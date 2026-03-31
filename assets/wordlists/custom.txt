@@ -1,0 +1,6 @@
+# Lista personalizada de palabras a censurar
+# Añade una palabra por línea (sin # al principio)
+# Se combinan con la lista base según el perfil de strictness del config.json
+# Ejemplo:
+# palabreja
+# otro_termino

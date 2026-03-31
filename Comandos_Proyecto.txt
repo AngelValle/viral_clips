@@ -1,0 +1,3 @@
+Ejecutar Claude Code en GLM 4.7 Flash desde Ollama:
+
+ollama launch claude --model glm-4.7-flash

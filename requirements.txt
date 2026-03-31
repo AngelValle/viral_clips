@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AngelSine Viral Clips Pipeline — requirements.txt
+# Python 3.10+  |  Windows 11 / Linux  |  CUDA (RTX 4080 SUPER recomendado)
+#
+# Instalación:
+#   pip install -r requirements.txt
+#
+# PyTorch con CUDA (instalar ANTES del resto si se usa GPU):
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# FFmpeg (externo, no pip):
+#   Windows: https://ffmpeg.org/download.html  o  winget install ffmpeg
+#   Linux:   sudo apt install ffmpeg
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Transcripción ─────────────────────────────────────────────────────────────
+faster-whisper>=1.0.0          # Motor de transcripción Whisper optimizado (CTranslate2)
+
+# ── Visión por computador ─────────────────────────────────────────────────────
+opencv-python>=4.8.0           # Detección facial Haar + análisis HSV + componentes conectados
+numpy>=1.24.0                  # Arrays y operaciones vectoriales
+
+# ── Imágenes y animación neón ─────────────────────────────────────────────────
+Pillow>=10.0.0                 # Generación del overlay neón (fuentes TrueType, blur, composición)
+
+# ── Deep learning (GPU) ───────────────────────────────────────────────────────
+# torch>=2.1.0                 # GPU RMS y utilidades CUDA
+#                              # Instalar manualmente con el índice CUDA correcto:
+#                              # pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# ── Censura de audio ──────────────────────────────────────────────────────────
+better-profanity>=0.7.0        # Base de palabras malsonantes
+
+# ── Utilidades estándar (incluidas en Python, no requieren instalación) ────────
+# json, pathlib, subprocess, logging, tempfile, hashlib,
+# wave, socket, urllib, re, argparse, warnings, os — stdlib
