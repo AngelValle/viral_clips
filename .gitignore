@@ -2,7 +2,6 @@ __pycache__/
 venv/
 .env
 *.pyc
-videos/
 *.mp4
 *.mkv
 *.avi
