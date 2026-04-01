@@ -1,4 +1,4 @@
-# Videos2ViralShort — Obtener clips/short desde videos/directos
+# Video2Short — Obtener clips/short desde videos/directos
 
 Pipeline automatizado para extraer, editar y publicar clips virales de streams/videos en formato vertical 9:16 (TikTok/YouTube Shorts) y horizontal 16:9. Transcripción con Whisper, detección viral con Gemini AI o señales de audio, composición GPU con FFmpeg NVENC y subtítulos estilo TikTok con karaoke.
 
