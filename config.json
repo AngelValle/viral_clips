@@ -41,6 +41,7 @@
     "min_fragment_dur": 1.5
   },
   "face_detection": {
+    "enabled": true,
     "transition_buffer_frames": 30,
     "smooth_tracking": true,
     "border_color_hsv_lower": [
@@ -80,6 +81,7 @@
     }
   },
   "subtitles": {
+    "enabled": true,
     "font_size": 72,
     "outline_width": 4,
     "position_y_ratio": 0.82,
@@ -105,7 +107,11 @@
     "poll_interval_seconds": 10,
     "move_processed": true
   },
+  "transcriber": {
+    "diarization_enabled": true
+  },
   "layout": {
+    "detect_driving": true,
     "webcam_w_ratio": 0.137,
     "webcam_h_ratio": 0.331,
     "webcam_x_offset": 22,

@@ -27,11 +27,12 @@ if not videos:
     st.warning(f"No hay vídeos en la carpeta de entrada: {input_dir}")
     st.stop()
 
-tab_lanzador, tab_revisor, tab_cache, tab_tools = st.tabs([
+tab_lanzador, tab_revisor, tab_cache, tab_tools, tab_config = st.tabs([
     "🚀 1. Lanzador de Tareas",
     "✂️ 2. Revisión y Publicación",
     "🗑️ 3. Caché",
     "🔧 4. Herramientas",
+    "⚙️ 5. Configuración",
 ])
 
 # ── Estado global ─────────────────────────────────────────────────────────────
@@ -564,3 +565,322 @@ with tab_revisor:
                 else:
                     _append_log(f"✅ Render completado: {selected_video.name}")
                     st.success("🎉 ¡Todos los clips han sido renderizados y gestionados!")
+
+
+# ==========================================
+# PESTAÑA 5: CONFIGURACIÓN
+# ==========================================
+with tab_config:
+    import copy as _copy
+
+    CONFIG_PATH = Path("config.json")
+
+    def _load_cfg() -> dict:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+    def _save_cfg(cfg: dict):
+        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg = _load_cfg()
+
+    st.markdown("### ⚙️ Configuración del Pipeline")
+    st.caption("Los cambios se aplican al guardar. El pipeline usará la nueva config en la siguiente ejecución.")
+
+    # ── Streamer ────────────────────────────────────────────────────────────────
+    with st.expander("🎮 Información del Streamer", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            streamer_name = st.text_input(
+                "Nombre del streamer",
+                value=cfg.get("claude", {}).get("streamer_name", ""),
+                help="Se usa en subtítulos, metadatos y títulos generados por IA.",
+            )
+        with col2:
+            game_name = st.text_input(
+                "Nombre del juego",
+                value=cfg.get("claude", {}).get("game_name", ""),
+                help="Se incluye en los títulos y descripciones de los clips.",
+            )
+        with col3:
+            content_type = st.selectbox(
+                "Tipo de contenido",
+                options=["gaming", "irl", "just_chatting", "sports", "music"],
+                index=["gaming", "irl", "just_chatting", "sports", "music"].index(
+                    cfg.get("claude", {}).get("content_type", "gaming")
+                ),
+            )
+
+    # ── Módulos opcionales ──────────────────────────────────────────────────────
+    with st.expander("🔀 Módulos Opcionales del Pipeline", expanded=True):
+        st.caption("Activa o desactiva partes del pipeline para ajustar velocidad y resultados.")
+        col1, col2 = st.columns(2)
+        with col1:
+            face_enabled = st.toggle(
+                "🎭 Detección de cámara/cara",
+                value=cfg.get("face_detection", {}).get("enabled", True),
+                help="Si está deshabilitado, el clip se renderiza en modo pantalla completa sin overlay de webcam.",
+            )
+            subtitles_enabled = st.toggle(
+                "💬 Subtítulos",
+                value=cfg.get("subtitles", {}).get("enabled", True),
+                help="Genera y embede subtítulos estilo karaoke TikTok en el clip final.",
+            )
+        with col2:
+            detect_driving = st.toggle(
+                "🚗 Detección de modo conducción",
+                value=cfg.get("layout", {}).get("detect_driving", True),
+                help="Detecta automáticamente escenas de conducción para ajustar el layout del HUD.",
+            )
+            diarization_enabled = st.toggle(
+                "🎙️ Diarización de locutores",
+                value=cfg.get("transcriber", {}).get("diarization_enabled", True),
+                help="Identifica a cada locutor con Pyannote. Requiere HF_TOKEN en el entorno.",
+            )
+
+    # ── Transcripción ───────────────────────────────────────────────────────────
+    with st.expander("🎤 Transcripción — Whisper"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            whisper_model = st.selectbox(
+                "Modelo Whisper",
+                options=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
+                index=["tiny", "base", "small", "medium", "large-v2", "large-v3"].index(
+                    cfg.get("whisper", {}).get("model", "large-v3")
+                ),
+                help="Modelos más grandes = mayor precisión pero más lento y más VRAM.",
+            )
+        with col2:
+            whisper_language = st.text_input(
+                "Idioma (código ISO)",
+                value=cfg.get("whisper", {}).get("language", "es"),
+                help="Ej: 'es' español, 'en' inglés, 'auto' para detección automática.",
+            )
+        with col3:
+            compute_options = ["float16", "float32", "int8", "int8_float16"]
+            compute_val = cfg.get("whisper", {}).get("compute_type", "float16")
+            whisper_compute = st.selectbox(
+                "Tipo de cómputo",
+                options=compute_options,
+                index=compute_options.index(compute_val) if compute_val in compute_options else 0,
+                help="float16 es óptimo para GPU NVIDIA. int8 para CPU.",
+            )
+
+    # ── Detección viral ─────────────────────────────────────────────────────────
+    with st.expander("🔥 Detección de Momentos Virales"):
+        vd = cfg.get("viral_detection", {})
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            min_clip_dur = st.number_input(
+                "Duración mínima del clip (s)",
+                min_value=1, max_value=120, value=int(vd.get("min_clip_duration", 10)),
+            )
+            pre_buffer = st.number_input(
+                "Buffer previo al momento viral (s)",
+                min_value=0, max_value=30, value=int(vd.get("pre_buffer_seconds", 3)),
+            )
+            skip_intro = st.number_input(
+                "Saltar intro del vídeo (s)",
+                min_value=0, max_value=300, value=int(vd.get("skip_intro_sec", 28)),
+                help="Ignora los primeros N segundos del stream.",
+            )
+        with col2:
+            max_clip_dur = st.number_input(
+                "Duración máxima del clip (s)",
+                min_value=5, max_value=300, value=int(vd.get("max_clip_duration", 60)),
+            )
+            post_buffer = st.number_input(
+                "Buffer posterior al momento viral (s)",
+                min_value=0, max_value=30, value=int(vd.get("post_buffer_seconds", 2)),
+            )
+            skip_outro = st.number_input(
+                "Saltar outro del vídeo (s)",
+                min_value=0, max_value=300, value=int(vd.get("skip_outro_sec", 28)),
+                help="Ignora los últimos N segundos del stream.",
+            )
+        with col3:
+            top_n_clips = st.number_input(
+                "Número máximo de clips",
+                min_value=1, max_value=9999, value=int(vd.get("top_n_clips", 999)),
+                help="Limita cuántos clips se generan por vídeo.",
+            )
+
+        viral_keywords_raw = st.text_area(
+            "Keywords virales (una por línea)",
+            value="\n".join(vd.get("viral_keywords", [])),
+            height=120,
+            help="Palabras que indican un momento viral en la transcripción.",
+        )
+
+    # ── Subtítulos ──────────────────────────────────────────────────────────────
+    with st.expander("💬 Subtítulos"):
+        sub = cfg.get("subtitles", {})
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            sub_font_size = st.number_input(
+                "Tamaño de fuente (px)", min_value=20, max_value=200,
+                value=int(sub.get("font_size", 72)),
+            )
+            sub_outline = st.number_input(
+                "Grosor del outline (px)", min_value=0, max_value=20,
+                value=int(sub.get("outline_width", 4)),
+            )
+        with col2:
+            sub_pos_y = st.slider(
+                "Posición vertical (ratio 0-1)",
+                min_value=0.0, max_value=1.0, step=0.01,
+                value=float(sub.get("position_y_ratio", 0.82)),
+                help="0 = arriba, 1 = abajo. 0.82 = zona inferior TikTok.",
+            )
+            sub_max_width = st.number_input(
+                "Ancho máximo de línea (chars)", min_value=5, max_value=60,
+                value=int(sub.get("max_line_width", 20)),
+            )
+        with col3:
+            sub_font_name = st.text_input(
+                "Fuente",
+                value=sub.get("font_name", "Showcard Gothic"),
+                help="Nombre exacto de la fuente instalada en Windows.",
+            )
+            sub_offset = st.number_input(
+                "Offset manual (s)",
+                min_value=-2.0, max_value=2.0, step=0.05,
+                value=float(sub.get("manual_offset_sec", 0.4)),
+                help="Ajusta el retardo de sincronía de los subtítulos.",
+            )
+
+    # ── Censura ─────────────────────────────────────────────────────────────────
+    with st.expander("🤬 Censura de Audio"):
+        cens = cfg.get("censorship", {})
+        col1, col2 = st.columns(2)
+        with col1:
+            cens_mode = st.selectbox(
+                "Perfil de censura",
+                options=["tiktok", "youtube", "instagram", "twitch"],
+                index=["tiktok", "youtube", "instagram", "twitch"].index(
+                    cens.get("mode", "tiktok")
+                ),
+                help="Determina el nivel de agresividad del filtro de palabras.",
+            )
+            beep_freq = st.number_input(
+                "Frecuencia del bip (Hz)", min_value=200, max_value=5000, step=50,
+                value=int(cens.get("beep_frequency_hz", 1000)),
+            )
+        with col2:
+            custom_words_raw = st.text_area(
+                "Palabras censuradas adicionales (una por línea)",
+                value="\n".join(cens.get("custom_words", [])),
+                height=100,
+                help="Se añaden al wordlist del perfil seleccionado.",
+            )
+
+    # ── IA / Gemini ─────────────────────────────────────────────────────────────
+    with st.expander("🤖 IA — Gemini"):
+        gem = cfg.get("gemini", {})
+        ai  = cfg.get("ai_features", {})
+        col1, col2 = st.columns(2)
+        with col1:
+            gemini_model = st.text_input(
+                "Modelo Gemini",
+                value=gem.get("model", "gemini-3.1-flash-lite-preview"),
+                help="Nombre completo del modelo Gemini a usar para detección viral y metadatos.",
+            )
+        with col2:
+            multimodal_video = st.toggle(
+                "Análisis multimodal de vídeo",
+                value=bool(ai.get("multimodal_video", False)),
+                help="Envía frames del vídeo a Gemini para análisis visual. Consume más tokens.",
+            )
+
+    # ── GPU / Hardware ───────────────────────────────────────────────────────────
+    with st.expander("🖥️ GPU / Hardware"):
+        gpu = cfg.get("gpu", {})
+        force_cpu = st.toggle(
+            "Forzar CPU (deshabilitar GPU)",
+            value=bool(gpu.get("force_cpu", False)),
+            help="Desactiva CUDA. Útil para debug o si la GPU no está disponible.",
+        )
+
+    # ── Salida ───────────────────────────────────────────────────────────────────
+    with st.expander("📦 Salida de Vídeo"):
+        out = cfg.get("output", {})
+        col1, col2 = st.columns(2)
+        with col1:
+            output_fps = st.number_input(
+                "FPS de salida", min_value=24, max_value=120, step=1,
+                value=int(out.get("fps", 60)),
+            )
+        with col2:
+            naming_pattern = st.text_input(
+                "Patrón de nombre de archivo",
+                value=out.get("naming_pattern", "{source_name}_clip_{n}.mp4"),
+                help="Variables disponibles: {source_name}, {n}",
+            )
+
+    # ── Guardar ──────────────────────────────────────────────────────────────────
+    st.divider()
+    if st.button("💾 Guardar Configuración", type="primary", use_container_width=True):
+        cfg_new = _copy.deepcopy(cfg)
+
+        # Streamer
+        cfg_new.setdefault("claude", {})
+        cfg_new["claude"]["streamer_name"] = streamer_name.strip()
+        cfg_new["claude"]["game_name"]     = game_name.strip()
+        cfg_new["claude"]["content_type"]  = content_type
+
+        # Módulos opcionales
+        cfg_new.setdefault("face_detection", {})["enabled"] = face_enabled
+        cfg_new.setdefault("subtitles", {})["enabled"]      = subtitles_enabled
+        cfg_new.setdefault("layout", {})["detect_driving"]  = detect_driving
+        cfg_new.setdefault("transcriber", {})["diarization_enabled"] = diarization_enabled
+
+        # Whisper
+        cfg_new.setdefault("whisper", {})
+        cfg_new["whisper"]["model"]        = whisper_model
+        cfg_new["whisper"]["language"]     = whisper_language.strip()
+        cfg_new["whisper"]["compute_type"] = whisper_compute
+
+        # Detección viral
+        cfg_new.setdefault("viral_detection", {})
+        cfg_new["viral_detection"]["min_clip_duration"]  = min_clip_dur
+        cfg_new["viral_detection"]["max_clip_duration"]  = max_clip_dur
+        cfg_new["viral_detection"]["pre_buffer_seconds"] = pre_buffer
+        cfg_new["viral_detection"]["post_buffer_seconds"] = post_buffer
+        cfg_new["viral_detection"]["top_n_clips"]        = top_n_clips
+        cfg_new["viral_detection"]["skip_intro_sec"]     = skip_intro
+        cfg_new["viral_detection"]["skip_outro_sec"]     = skip_outro
+        cfg_new["viral_detection"]["viral_keywords"]     = [
+            kw.strip() for kw in viral_keywords_raw.splitlines() if kw.strip()
+        ]
+
+        # Subtítulos
+        cfg_new.setdefault("subtitles", {})
+        cfg_new["subtitles"]["font_size"]        = sub_font_size
+        cfg_new["subtitles"]["outline_width"]    = sub_outline
+        cfg_new["subtitles"]["position_y_ratio"] = round(sub_pos_y, 3)
+        cfg_new["subtitles"]["max_line_width"]   = sub_max_width
+        cfg_new["subtitles"]["font_name"]        = sub_font_name.strip()
+        cfg_new["subtitles"]["manual_offset_sec"] = round(sub_offset, 3)
+
+        # Censura
+        cfg_new.setdefault("censorship", {})
+        cfg_new["censorship"]["mode"]              = cens_mode
+        cfg_new["censorship"]["beep_frequency_hz"] = beep_freq
+        cfg_new["censorship"]["custom_words"]      = [
+            w.strip() for w in custom_words_raw.splitlines() if w.strip()
+        ]
+
+        # IA / Gemini
+        cfg_new.setdefault("gemini", {})["model"]             = gemini_model.strip()
+        cfg_new.setdefault("ai_features", {})["multimodal_video"] = multimodal_video
+
+        # GPU
+        cfg_new.setdefault("gpu", {})["force_cpu"] = force_cpu
+
+        # Salida
+        cfg_new.setdefault("output", {})
+        cfg_new["output"]["fps"]             = output_fps
+        cfg_new["output"]["naming_pattern"]  = naming_pattern.strip()
+
+        _save_cfg(cfg_new)
+        st.success("✅ Configuración guardada en `config.json`")
+        st.rerun()

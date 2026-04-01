@@ -98,8 +98,9 @@ def transcribe(video_path: Path, config: dict) -> List[Dict[str, Any]]:
         pass
 
     # ── Diarización de locutores (opcional, requiere HF_TOKEN en el entorno) ───
+    diarization_enabled = config.get("transcriber", {}).get("diarization_enabled", True)
     hf_token = os.environ.get("HF_TOKEN", "").strip()
-    if hf_token:
+    if diarization_enabled and hf_token:
         try:
             # Silenciar warnings ruidosos de pyannote/torch que no son errores
             warnings.filterwarnings("ignore", message="torchcodec is not installed")

@@ -294,15 +294,26 @@ def process_video(video_path: Path, config: dict, use_cache: bool = True, max_st
             # ── PASO 4: Detección facial ──────────────────────────────────────
             if max_step < 4:
                 continue
-            logger.info("PASO 4/8 — Detección facial")
-            face_data = cache.get_face_data(clip_stem) if cache else None
-            if face_data is None:
-                face_data, is_driving = analyze_video_faces(raw_clip, config)
-                if cache:
-                    cache.save_face_data(clip_stem, face_data, is_driving=is_driving)
+            face_enabled   = config.get("face_detection", {}).get("enabled", True)
+            detect_driving = config.get("layout", {}).get("detect_driving", True)
+            if not face_enabled:
+                logger.info("PASO 4/8 — Detección facial deshabilitada (fullscreen mode)")
+                face_data   = []
+                is_driving  = False
             else:
-                logger.info("PASO 4/8 — Face data ✓ (desde caché)")
-                is_driving = cache.get_is_driving(clip_stem) if cache else False
+                logger.info("PASO 4/8 — Detección facial")
+                face_data = cache.get_face_data(clip_stem) if cache else None
+                if face_data is None:
+                    face_data, is_driving = analyze_video_faces(raw_clip, config)
+                    if not detect_driving:
+                        is_driving = False
+                    if cache:
+                        cache.save_face_data(clip_stem, face_data, is_driving=is_driving)
+                else:
+                    logger.info("PASO 4/8 — Face data ✓ (desde caché)")
+                    is_driving = (cache.get_is_driving(clip_stem) if cache else False)
+                    if not detect_driving:
+                        is_driving = False
 
             # ── PASO 5: Composición 9:16 ──────────────────────────────────────
             if max_step < 5:
@@ -354,8 +365,12 @@ def process_video(video_path: Path, config: dict, use_cache: bool = True, max_st
                 if w["start"] < _clip_dur
             ]
 
-            ass_file = generate_subtitles(sub_words, config, tmp, clip_stem)
-            embed_subtitles(censored_audio, ass_file, final_path, config)
+            if config.get("subtitles", {}).get("enabled", True):
+                ass_file = generate_subtitles(sub_words, config, tmp, clip_stem)
+                embed_subtitles(censored_audio, ass_file, final_path, config)
+            else:
+                logger.info("PASO 6/8 — Subtítulos deshabilitados, copiando sin .ass")
+                shutil.copy2(censored_audio, final_path)
             save_metadata(final_path, video_path, segment,
                           censored_words, config, meta_dir)
 

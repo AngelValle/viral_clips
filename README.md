@@ -35,7 +35,7 @@ Pipeline automatizado para extraer, editar y publicar clips virales de streams d
 - **Caché inteligente** por vídeo: evita reprocesar transcripciones, segmentos y datos faciales si no hay cambios
 - **Modo watcher** (`--watch`): monitoriza la carpeta de entrada y procesa nuevos vídeos automáticamente
 - **Publicación automática** a YouTube Shorts y TikTok con soporte de programación horaria
-- **Interfaz web Streamlit** para revisar cortes, ajustar tiempos y lanzar el pipeline
+- **Interfaz web Streamlit** para revisar cortes, ajustar tiempos, lanzar el pipeline y configurar todos los parámetros sin editar archivos
 - **GPU end-to-end**: NVDEC para decodificación, NVENC (h264_nvenc) para codificación
 
 ---
@@ -214,7 +214,7 @@ El script mostrará el `border_min_ratio` medido y recomendaciones. Copia el val
 
 ### Paso 6 — Ajustar los parámetros del streamer
 
-Edita `config.json` con los datos de tu canal:
+La forma más cómoda es usar la **Pestaña 5 — Configuración** de la UI, que permite editar todos los parámetros sin tocar archivos JSON. Si prefieres editar directamente `config.json`:
 
 ```json
 "claude": {
@@ -403,6 +403,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 ```json
 {
+  "enabled": true,
   "border_min_ratio": 0.7,
   "border_px": 8,
   "border_color_hsv_lower": [125, 50, 50],
@@ -415,6 +416,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 | Parámetro | Descripción |
 |---|---|
+| `enabled` | Si `false`, omite completamente el análisis OpenCV y renderiza en modo pantalla completa sin overlay de webcam |
 | `border_min_ratio` | Fracción mínima de píxeles del color del borde para confirmar webcam visible. **Calibrar con `tools/calibrate.py border`** |
 | `border_color_hsv_lower/upper` | Rango HSV del color del borde de la webcam |
 | `border_px` | Grosor en píxeles del borde a analizar |
@@ -424,6 +426,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 ```json
 {
+  "detect_driving": true,
   "webcam_w_ratio": 0.137,
   "webcam_h_ratio": 0.331,
   "webcam_x_offset": 22,
@@ -440,6 +443,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 | Parámetro | Descripción |
 |---|---|
+| `detect_driving` | Si `false`, deshabilita la detección de modo conducción y usa siempre el layout estándar |
 | `webcam_w/h_ratio` | Anchura/altura de la zona webcam como fracción del frame |
 | `webcam_x_offset` | Offset horizontal en píxeles del borde izquierdo de la webcam |
 | `webcam_y_center_ratio` | Centro vertical de la webcam como fracción de la altura |
@@ -451,6 +455,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 ```json
 {
+  "enabled": true,
   "font_size": 72,
   "font_name": "Showcard Gothic",
   "outline_width": 4,
@@ -463,6 +468,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 | Parámetro | Descripción |
 |---|---|
+| `enabled` | Si `false`, omite la generación y el embed del `.ass` — el clip se guarda sin subtítulos |
 | `font_name` | Nombre de la fuente instalada en el sistema |
 | `position_y_ratio` | Posición vertical (0.0 = arriba, 1.0 = abajo) |
 | `max_line_width` | Número máximo de caracteres por frase en el karaoke |
@@ -489,6 +495,18 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 | `mode` | Perfil de censura activo: `"tiktok"`, `"youtube"`, `"instagram"`, `"twitch"` |
 | `custom_words` | Lista adicional de palabras a censurar |
 | `beep_frequency_hz` | Frecuencia del pitido de censura en Hz |
+
+### `transcriber`
+
+```json
+{
+  "diarization_enabled": true
+}
+```
+
+| Parámetro | Descripción |
+|---|---|
+| `diarization_enabled` | Si `false`, deshabilita Pyannote aunque `HF_TOKEN` esté definido. Todos los subtítulos usan el color por defecto (blanco) |
 
 ### `gemini`
 
@@ -614,10 +632,11 @@ Resultado cacheado en `segments.json`.
 
 ### Paso 4 — Detección facial
 
+- Si `face_detection.enabled = false`: se omite completamente este paso, el clip se compondrá en modo pantalla completa sin overlay de webcam
 - **Detección de borde**: analiza la zona configurada (HSV) para confirmar si la webcam está visible en este frame
 - **Detección de cara**: OpenCV Haar cascade dentro de la zona de webcam
 - Analiza un frame cada 2 segundos, interpola entre muestras
-- **Detección modo conducción**: analiza el HUD de GTA (componentes blancos del velocímetro/minimapa) para determinar si el jugador va en vehículo
+- **Detección modo conducción**: analiza el HUD de GTA (componentes blancos del velocímetro/minimapa) para determinar si el jugador va en vehículo. Se puede deshabilitar con `layout.detect_driving = false`
 - Resultado cacheado en `face_{clip_stem}.json` con flag `is_driving`
 
 ### Paso 5 — Composición 9:16 dinámica
@@ -632,12 +651,14 @@ Resultado cacheado en `segments.json`.
 
 1. Detecta palabras malsonantes según el perfil activo de `config.json`
 2. Aplica censura de audio (pitido de 440 ms sobre cada palabra detectada)
-3. Genera archivo `.ass` con subtítulos estilo karaoke:
-   - Frase completa visible durante toda su duración
-   - Palabra activa destacada en rojo, resto en blanco (o color del locutor)
-   - Colores por locutor si la diarización está activa
-   - Fuente `Showcard Gothic`, tamaño 72, outline negro de 4px
-4. Embebe los subtítulos en el vídeo final (`ass` filter de FFmpeg)
+3. Si `subtitles.enabled = true` (por defecto):
+   - Genera archivo `.ass` con subtítulos estilo karaoke:
+     - Frase completa visible durante toda su duración
+     - Palabra activa destacada en rojo, resto en blanco (o color del locutor)
+     - Colores por locutor si `transcriber.diarization_enabled = true` y `HF_TOKEN` está definido
+     - Fuente `Showcard Gothic`, tamaño 72, outline negro de 4px
+   - Embebe los subtítulos en el vídeo final (`ass` filter de FFmpeg)
+4. Si `subtitles.enabled = false`: copia el clip censurado directamente sin procesar subtítulos
 5. Guarda metadata básica en `videos/output/metadata/{clip_name}.json`
 
 ### Paso 7 — Metadata viral con IA
@@ -715,6 +736,22 @@ Requiere haber ejecutado al menos el **Paso 2** para que existan segmentos en ca
 ### Pestaña 4 — Herramientas
 
 Ver sección [Herramientas de calibración](#herramientas-de-calibración).
+
+### Pestaña 5 — Configuración
+
+Permite editar todos los parámetros del pipeline sin tocar `config.json` directamente. Los cambios se guardan con el botón **💾 Guardar Configuración** y surten efecto en la siguiente ejecución.
+
+| Sección | Parámetros editables |
+|---|---|
+| **Streamer** | Nombre del streamer, nombre del juego, tipo de contenido |
+| **Módulos opcionales** | Detección de cámara/cara, subtítulos, detección de conducción, diarización de locutores |
+| **Whisper** | Modelo (`tiny` → `large-v3`), idioma, tipo de cómputo |
+| **Detección viral** | Duraciones mín/máx, buffers, intro/outro, nº máximo de clips, keywords virales |
+| **Subtítulos** | Fuente, tamaño, outline, posición vertical, ancho máximo de línea, offset de sincronía |
+| **Censura** | Perfil activo, frecuencia del bip, palabras adicionales |
+| **IA — Gemini** | Modelo Gemini, análisis multimodal de vídeo |
+| **GPU / Hardware** | Forzar CPU, deshabilitar CUDA |
+| **Salida** | FPS de salida, patrón de nombre de archivo |
 
 ---
 
@@ -828,6 +865,6 @@ Desde la UI: **Pestaña 3 — Caché** para borrado granular o total.
 
 - El pipeline completo de un stream de 30 minutos tarda aproximadamente 8–15 minutos en una RTX 4080 Super
 - La transcripción con Whisper `large-v3` es el paso más lento (~5–8 min para 30 min de vídeo); reducir a `medium` o `small` si la velocidad es prioritaria
-- La diarización con Pyannote añade ~3–5 minutos adicionales; desactivar si no se necesitan colores por locutor (`HF_TOKEN` sin definir)
+- La diarización con Pyannote añade ~3–5 minutos adicionales; desactivar si no se necesitan colores por locutor (poner `transcriber.diarization_enabled: false` en config o en la Pestaña 5 — Configuración)
 - Los Pasos 3–6 (extracción, composición, render) se benefician directamente de NVDEC + NVENC
 - El modo `--max-step 2` permite revisar los clips en la UI antes de renderizar, evitando renders innecesarios
