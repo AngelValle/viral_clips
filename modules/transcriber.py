@@ -147,23 +147,24 @@ def transcribe(video_path: Path, config: dict) -> List[Dict[str, Any]]:
             diarization = pipeline({"waveform": waveform, "sample_rate": _sr})
 
             # Extraer el objeto Annotation compatible con cualquier versión de pyannote:
-            #   - pyannote < 3.3  → devuelve Annotation directamente
-            #   - pyannote ≥ 3.3  → devuelve DiarizeOutput (namedtuple/dataclass)
-            #     con el Annotation en algún campo (buscar el que tenga itertracks)
+            #   - pyannote < 3.3   → devuelve Annotation directamente (tiene itertracks)
+            #   - pyannote ≥ 3.3   → devuelve DiarizeOutput (@dataclass)
+            #     con el campo .speaker_diarization (Annotation con itertracks)
             if hasattr(diarization, "itertracks"):
+                # Retorno legacy: Annotation directa
                 annotation = diarization
-            elif hasattr(diarization, "diarization") and hasattr(diarization.diarization, "itertracks"):
-                annotation = diarization.diarization
-            elif hasattr(diarization, "_fields"):
+            elif hasattr(diarization, "speaker_diarization"):
+                # DiarizeOutput (@dataclass pyannote ≥ 3.3)
+                annotation = diarization.speaker_diarization
+            else:
+                # Fallback genérico: buscar cualquier atributo con itertracks
                 annotation = next(
-                    (getattr(diarization, f) for f in diarization._fields
-                     if hasattr(getattr(diarization, f, None), "itertracks")),
+                    (v for v in vars(diarization).values()
+                     if hasattr(v, "itertracks")),
                     None,
                 )
-            else:
-                annotation = None
 
-            if annotation is None:
+            if annotation is None or not hasattr(annotation, "itertracks"):
                 raise ValueError(f"No se pudo extraer Annotation de {type(diarization).__name__}")
 
             # Construir lista plana (start, end, speaker) para lookup eficiente

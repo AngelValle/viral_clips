@@ -86,54 +86,70 @@ def extract_segment(
         return output_path
 
     # ── Caso múltiple: varios fragmentos con jump cuts ────────────────────────
+    # Extrae cada fragmento por separado con -ss (seek rápido sin decodificar
+    # desde el inicio) y luego los une con el concat demuxer (-c copy).
+    # Esto es 10-20× más rápido que filter_complex trim, que decodifica desde
+    # el frame 0 hasta cada timestamp, lo que en streams de horas puede tardar
+    # varios minutos por fragmento.
     n = len(fragments)
-    filter_parts = []
-    v_labels = []
-    a_labels = []
+    use_nvdec = ["-hwaccel", "cuda"] if hw.get("hwaccel") == "cuda" else []
 
-    for i, frag in enumerate(fragments):
-        fs  = round(frag["start"], 3)
-        dur = round(frag["end"] - frag["start"], 3)
-        filter_parts.append(
-            f"[0:v]trim=start={fs}:duration={dur},setpts=PTS-STARTPTS[v{i}]"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vc_parts_"))
+    try:
+        part_files = []
+
+        for i, frag in enumerate(fragments):
+            fs  = round(frag["start"], 3)
+            dur = round(frag["end"] - frag["start"], 3)
+            part = tmp_dir / f"part_{i:03d}.mp4"
+
+            def _run_part(encoder, extra_args, _part=part, _fs=fs, _dur=dur):
+                cmd = ["ffmpeg", "-y"]
+                if use_nvdec and encoder == hw["encoder"]:
+                    cmd += use_nvdec
+                cmd += [
+                    "-accurate_seek",
+                    "-ss", str(_fs),
+                    "-i", str(source_path),
+                    "-t", str(_dur),
+                    "-c:v", encoder, *extra_args,
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-avoid_negative_ts", "make_zero",
+                    str(_part),
+                ]
+                return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+            r = _run_part(hw["encoder"], hw["extra_enc_args"])
+            if r.returncode != 0 and hw["is_hw"]:
+                logger.debug(f"NVENC falló en fragmento {i+1}/{n}, reintentando con libx264")
+                r = _run_part("libx264", ["-preset", "fast", "-crf", "18"])
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"Fallo extrayendo fragmento {i+1}/{n}: "
+                    f"{r.stderr.decode(errors='ignore')[-300:]}"
+                )
+            part_files.append(part)
+
+        # Unir partes con concat demuxer (-c copy, sin recodificar)
+        concat_list = tmp_dir / "concat.txt"
+        concat_list.write_text(
+            "\n".join(f"file '{p.as_posix()}'" for p in part_files),
+            encoding="utf-8",
         )
-        filter_parts.append(
-            f"[0:a]atrim=start={fs}:duration={dur},asetpts=PTS-STARTPTS[a{i}]"
-        )
-        v_labels.append(f"[v{i}]")
-        a_labels.append(f"[a{i}]")
-
-    filter_parts.append("".join(v_labels) + f"concat=n={n}:v=1:a=0[vout]")
-    filter_parts.append("".join(a_labels) + f"concat=n={n}:v=0:a=1[aout]")
-    filter_complex = ";".join(filter_parts)
-
-    def build_multi(encoder, extra_args):
-        return [
-            "ffmpeg", "-y",
-            "-i", str(source_path),
-            "-filter_complex", filter_complex,
-            "-map", "[vout]", "-map", "[aout]",
-            "-c:v", encoder, *extra_args,
-            "-c:a", "aac", "-b:a", "192k",
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
-
-    result = subprocess.run(
-        build_multi(hw["encoder"], hw["extra_enc_args"]),
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-    )
-    if result.returncode != 0 and hw["is_hw"]:
-        err = result.stderr.decode(errors="ignore")
-        logger.warning(f"NVENC falló en extracción multi-fragmento, reintentando con libx264:\n{err[-300:]}")
         result = subprocess.run(
-            build_multi("libx264", ["-preset", "fast", "-crf", "18"]),
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            ["ffmpeg", "-y",
+             "-f", "concat", "-safe", "0", "-i", str(concat_list),
+             "-c", "copy",
+             "-movflags", "+faststart",
+             str(output_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
-    if result.returncode != 0:
-        logger.error(f"Error extrayendo multi-fragmento: {result.stderr.decode(errors='ignore')[-400:]}")
-        raise RuntimeError(f"Fallo al extraer {n} fragmentos")
+        if result.returncode != 0:
+            logger.error(f"Error concatenando fragmentos: {result.stderr.decode(errors='ignore')[-400:]}")
+            raise RuntimeError(f"Fallo al concatenar {n} fragmentos")
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     total = sum(f["end"] - f["start"] for f in fragments)
     logger.debug(f"Segmento extraído ({n} fragmentos, {total:.1f}s total): {output_path.name}")

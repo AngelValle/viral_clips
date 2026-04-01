@@ -120,10 +120,14 @@ def _call_gemini(
             return response.text
         except Exception as exc:
             err = str(exc)
-            is_rate_limit = any(k in err for k in ("429", "quota", "RESOURCE_EXHAUSTED", "rate"))
-            if is_rate_limit and attempt < max_retries:
+            is_transient = any(k in err for k in (
+                "429", "quota", "RESOURCE_EXHAUSTED", "rate",
+                "503", "UNAVAILABLE", "high demand",
+                "500", "INTERNAL", "overloaded",
+            ))
+            if is_transient and attempt < max_retries:
                 logger.warning(
-                    f"Gemini rate limit (intento {attempt}/{max_retries}). "
+                    f"Gemini API error transitorio (intento {attempt}/{max_retries}): {exc}. "
                     f"Reintentando en {retry_wait:.0f}s..."
                 )
                 time.sleep(retry_wait)
@@ -219,8 +223,9 @@ Estructura exacta:
 ]
 
 Cada "fragments" debe tener al menos 1 elemento. Usa timestamps exactos de la transcripción.
-score: 1.0 = momento excepcional, 0.5 = interesante, 0.3 = aceptable.
-Si no hay momentos virales responde: []"""
+score: 1.0 = momento excepcional, 0.5 = interesante, 0.2 = aceptable (incluir si hay algo de contenido).
+Sé generoso: es mejor incluir un clip mediocre que perderse uno bueno. Mínimo score para incluir: 0.2.
+Si no hay ningún momento con score ≥ 0.2 responde: []"""
 
 
 # ── Parser de respuesta Gemini ────────────────────────────────────────────────
@@ -496,7 +501,7 @@ def detect_viral_moments(
                     f"({len(valid_words)} palabras, {video_duration/60:.1f} min)...")
 
         prompt   = _build_viral_prompt(valid_words, config, video_duration)
-        response = _call_gemini(prompt, config, max_tokens=4096,
+        response = _call_gemini(prompt, config, max_tokens=16384,
                                 frames=frames if frames else None)
 
         if _tmp_obj:
