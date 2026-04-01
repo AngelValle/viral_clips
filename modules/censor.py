@@ -48,6 +48,8 @@ def _load_wordlist(wordlist_path: Path) -> List[str]:
 def build_profanity_set(config: Dict[str, Any]) -> Set[str]:
     """Construye el conjunto de palabras a censurar según perfil y config."""
     mode      = config["censorship"]["mode"]
+    if mode == "desactivado":
+        return set()
     profile   = config["censorship"]["profiles"].get(mode, {})
     strictness = profile.get("strictness", "medium")
 

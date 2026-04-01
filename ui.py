@@ -378,6 +378,32 @@ with tab_revisor:
         segments = cache.get_segments()
         local_tz = datetime.datetime.now().astimezone().tzinfo
 
+        # ── Duración total del vídeo (cacheada en session_state) ─────────────
+        _vdur_key = f"vid_dur_{selected_video.stem}"
+        if _vdur_key not in st.session_state:
+            try:
+                _vr = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_format", str(selected_video)],
+                    capture_output=True, text=True,
+                )
+                st.session_state[_vdur_key] = float(json.loads(_vr.stdout)["format"]["duration"])
+            except Exception:
+                st.session_state[_vdur_key] = max(
+                    (float(s["end"]) for s in segments), default=300.0
+                ) + 30.0
+        vid_dur = float(st.session_state[_vdur_key])
+
+        # ── Inicializar fragmentos editables en session_state ─────────────────
+        for _i, _seg in enumerate(segments):
+            _fk = f"clip_frags_{selected_video.stem}_{_i}"
+            if _fk not in st.session_state:
+                _raw = _seg.get("fragments")
+                if _raw:
+                    st.session_state[_fk] = [dict(f) for f in _raw]
+                else:
+                    st.session_state[_fk] = [{"start": float(_seg["start"]), "end": float(_seg["end"])}]
+
         # ── Un bloque por clip: preview izquierda + controles derecha ──────────
         # Los botones van fuera del form; el form solo recoge el estado al guardar.
 
@@ -448,20 +474,29 @@ with tab_revisor:
                     with open(preview_path, "rb") as f:
                         st.video(f.read(), format="video/mp4")
 
-            # ── Columna derecha: edición y publicación (sin form aquí) ────────
+            # ── Columna derecha: fragmentos editables + publicación ───────────
             with col_edit:
-                frags = seg.get("fragments", [])
-                is_multi = frags and len(frags) > 1
+                _fk = f"clip_frags_{selected_video.stem}_{i}"
+                _cur_frags = st.session_state[_fk]
 
-                st.markdown("#### ⚙️ Edición")
+                st.markdown("#### ✂️ Fragmentos")
+                _total_s = sum(f["end"] - f["start"] for f in _cur_frags)
+                st.caption(f"{len(_cur_frags)} fragmento(s) — {_total_s:.1f}s total")
 
-                if is_multi:
-                    st.caption(f"{len(frags)} fragmentos — duración total: {sum(f['end']-f['start'] for f in frags):.1f}s")
-                    for fi, frag in enumerate(frags):
-                        st.markdown(f"**Fragmento {fi+1}:** `{frag['start']:.1f}s → {frag['end']:.1f}s`")
-                else:
-                    total_dur = float(seg["end"]) - float(seg["start"])
-                    st.caption(f"⏱ {seg['start']:.1f}s — {seg['end']:.1f}s ({total_dur:.1f}s)")
+                for _fi, _frag in enumerate(_cur_frags):
+                    _cf, _cd = st.columns([5, 1])
+                    _cf.markdown(f"**Frag {_fi+1}:** `{_frag['start']:.1f}s → {_frag['end']:.1f}s`")
+                    if _cd.button("✕", key=f"del_{i}_{_fi}", help="Eliminar fragmento",
+                                  disabled=len(_cur_frags) <= 1):
+                        st.session_state[_fk].pop(_fi)
+                        st.rerun()
+
+                if st.button("➕ Añadir fragmento", key=f"add_{i}"):
+                    _last = _cur_frags[-1]
+                    _ns = round(min(_last["end"] + 1.0, max(0.0, vid_dur - 2.0)), 1)
+                    _ne = round(min(_ns + 5.0, vid_dur), 1)
+                    st.session_state[_fk].append({"start": _ns, "end": _ne})
+                    st.rerun()
 
                 st.markdown("#### 🚀 Publicación")
                 st.caption("Marca las plataformas en el formulario de abajo.")
@@ -473,36 +508,26 @@ with tab_revisor:
             updated_segments = []
 
             for i, seg in enumerate(segments):
-                frags = seg.get("fragments", [])
-                is_multi = frags and len(frags) > 1
+                _fk = f"clip_frags_{selected_video.stem}_{i}"
+                _form_frags = st.session_state.get(
+                    _fk,
+                    [{"start": float(seg["start"]), "end": float(seg["end"])}],
+                )
 
                 st.markdown(f"**Clip {i+1}** — {seg.get('gemini_desc', '')}")
                 aprobado = st.checkbox("✅ Aprobar", value=True, key=f"chk_{i}")
 
-                if is_multi:
-                    # Slider por fragmento
-                    new_frags = []
-                    for fi, frag in enumerate(frags):
-                        f_min = max(0.0, float(frag["start"]) - 10.0)
-                        f_max = float(frag["end"]) + 10.0
-                        fs, fe = st.slider(
-                            f"Fragmento {fi+1}:",
-                            min_value=f_min, max_value=f_max,
-                            value=(float(frag["start"]), float(frag["end"])),
-                            step=0.1, key=f"frag_{i}_{fi}"
-                        )
-                        new_frags.append({"start": fs, "end": fe})
-                    new_start = new_frags[0]["start"]
-                    new_end = new_frags[-1]["end"]
-                else:
-                    new_start, new_end = st.slider(
-                        "Tiempos (s):",
-                        min_value=max(0.0, float(seg["start"]) - 30.0),
-                        max_value=float(seg["end"]) + 30.0,
-                        value=(float(seg["start"]), float(seg["end"])),
-                        step=0.1, key=f"slider_{i}"
+                new_frags = []
+                for fi, frag in enumerate(_form_frags):
+                    fs, fe = st.slider(
+                        f"Fragmento {fi+1}:",
+                        min_value=0.0, max_value=float(vid_dur),
+                        value=(float(frag["start"]), float(frag["end"])),
+                        step=0.1, key=f"frag_{i}_{fi}"
                     )
-                    new_frags = None
+                    new_frags.append({"start": fs, "end": fe})
+                new_start = new_frags[0]["start"]
+                new_end = new_frags[-1]["end"]
 
                 col_yt, col_tk = st.columns(2)
                 pub_yt = col_yt.checkbox("▶ YouTube Shorts", value=False, key=f"yt_{i}")
@@ -523,11 +548,7 @@ with tab_revisor:
                     updated_seg = seg.copy()
                     updated_seg["start"] = new_start
                     updated_seg["end"] = new_end
-                    if new_frags:
-                        updated_seg["fragments"] = new_frags
-                    elif updated_seg.get("fragments"):
-                        updated_seg["fragments"][0]["start"] = new_start
-                        updated_seg["fragments"][-1]["end"] = new_end
+                    updated_seg["fragments"] = new_frags
                     updated_seg["publish_yt"] = pub_yt
                     updated_seg["publish_tk"] = pub_tk
                     updated_seg["schedule_time"] = schedule_iso
@@ -542,6 +563,8 @@ with tab_revisor:
                     p = Path(tempfile.gettempdir()) / f"preview_{selected_video.stem}_{i}.mp4"
                     if p.exists(): p.unlink()
                     st.session_state.pop(f"preview_ready_{selected_video.stem}_{i}", None)
+                    # Reinicializar fragmentos desde los datos guardados en el próximo render
+                    st.session_state.pop(f"clip_frags_{selected_video.stem}_{i}", None)
                 if not updated_segments:
                     st.error("No has aprobado ningún clip.")
                 else:
@@ -753,13 +776,13 @@ with tab_config:
         cens = cfg.get("censorship", {})
         col1, col2 = st.columns(2)
         with col1:
+            _cens_options = ["tiktok", "youtube", "instagram", "twitch", "desactivado"]
+            _cens_current = cens.get("mode", "tiktok")
             cens_mode = st.selectbox(
                 "Perfil de censura",
-                options=["tiktok", "youtube", "instagram", "twitch"],
-                index=["tiktok", "youtube", "instagram", "twitch"].index(
-                    cens.get("mode", "tiktok")
-                ),
-                help="Determina el nivel de agresividad del filtro de palabras.",
+                options=_cens_options,
+                index=_cens_options.index(_cens_current) if _cens_current in _cens_options else 0,
+                help="Determina el nivel de agresividad del filtro de palabras. 'desactivado' omite la censura por completo.",
             )
             beep_freq = st.number_input(
                 "Frecuencia del bip (Hz)", min_value=200, max_value=5000, step=50,
@@ -788,7 +811,20 @@ with tab_config:
             multimodal_video = st.toggle(
                 "Análisis multimodal de vídeo",
                 value=bool(ai.get("multimodal_video", False)),
-                help="Envía frames del vídeo a Gemini para análisis visual. Consume más tokens.",
+                help=(
+                    "Envía frames del stream a Gemini junto a la transcripción "
+                    "para detectar momentos virales también por contexto visual. "
+                    "Compatible con el tier gratuito. Añade ~1-3 min extra de procesamiento."
+                ),
+            )
+            multimodal_interval = st.number_input(
+                "Intervalo entre frames (s)",
+                min_value=5,
+                max_value=120,
+                step=5,
+                value=int(ai.get("multimodal_interval_sec", 10)),
+                disabled=not multimodal_video,
+                help="Cada cuántos segundos del stream se extrae un frame. Menos segundos = más contexto visual pero más tokens.",
             )
 
     # ── GPU / Hardware ───────────────────────────────────────────────────────────
@@ -808,6 +844,15 @@ with tab_config:
             output_fps = st.number_input(
                 "FPS de salida", min_value=24, max_value=120, step=1,
                 value=int(out.get("fps", 60)),
+            )
+            _orient_options = ["vertical", "horizontal"]
+            _orient_current = out.get("orientation", "vertical")
+            output_orientation = st.selectbox(
+                "Formato",
+                options=_orient_options,
+                index=_orient_options.index(_orient_current) if _orient_current in _orient_options else 0,
+                format_func=lambda x: "Vertical 9:16" if x == "vertical" else "Horizontal 16:9",
+                help="Vertical 9:16 aplica composición con cámara. Horizontal 16:9 conserva el vídeo original sin reencuadre.",
             )
         with col2:
             naming_pattern = st.text_input(
@@ -871,7 +916,8 @@ with tab_config:
 
         # IA / Gemini
         cfg_new.setdefault("gemini", {})["model"]             = gemini_model.strip()
-        cfg_new.setdefault("ai_features", {})["multimodal_video"] = multimodal_video
+        cfg_new.setdefault("ai_features", {})["multimodal_video"]        = multimodal_video
+        cfg_new["ai_features"]["multimodal_interval_sec"] = multimodal_interval
 
         # GPU
         cfg_new.setdefault("gpu", {})["force_cpu"] = force_cpu
@@ -879,6 +925,7 @@ with tab_config:
         # Salida
         cfg_new.setdefault("output", {})
         cfg_new["output"]["fps"]             = output_fps
+        cfg_new["output"]["orientation"]     = output_orientation
         cfg_new["output"]["naming_pattern"]  = naming_pattern.strip()
 
         _save_cfg(cfg_new)

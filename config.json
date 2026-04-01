@@ -95,6 +95,7 @@
     "resolution_h": 1920,
     "fps": 60,
     "audio_codec": "aac",
+    "orientation": "vertical",
     "naming_pattern": "{source_name}_clip_{n}.mp4"
   },
   "gpu": {
@@ -147,14 +148,15 @@
     "model": "gemini-3.1-flash-lite-preview"
   },
   "ai_features": {
-    "multimodal_video": false
+    "multimodal_video": true,
+    "multimodal_interval_sec": 5
   },
   "dynamic_crop": {
     "enabled": false,
     "motion_alpha": 0.03,
     "zoom_alpha": 0.01,
     "motion_threshold": 25,
-    "concentration_max": 0.10,
+    "concentration_max": 0.1,
     "hud_exclude_ratio": 0.15,
     "x_offset": 0,
     "analysis_every": 3

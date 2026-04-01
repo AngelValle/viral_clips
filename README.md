@@ -28,10 +28,10 @@ Pipeline automatizado para extraer, editar y publicar clips virales de streams d
 - **Transcripción automática** con `faster-whisper` (modelo `large-v3`, GPU float16)
 - **Diarización de locutores** opcional con Pyannote Audio 3.1 (requiere `HF_TOKEN`)
 - **Detección viral** con Google Gemini (analiza la transcripción completa del stream) o fallback por señales de audio (picos de energía, velocidad de habla, palabras clave)
-- **Composición 9:16** dinámica: gameplay centrado + overlay de webcam con animación neon del nombre del streamer
+- **Composición 9:16** dinámica: gameplay centrado + overlay de webcam con animación neon del nombre del streamer (modo Vertical). Modo **Horizontal 16:9** disponible para conservar el vídeo original sin reencuadre
 - **Detección de modo conducción** automática (ajusta el recorte del HUD de GTA)
 - **Subtítulos estilo TikTok** con efecto karaoke y colores por locutor (formato ASS)
-- **Censura automática** de palabras malsonantes con pitido (perfiles: tiktok, youtube, instagram, twitch)
+- **Censura automática** de palabras malsonantes con pitido (perfiles: tiktok, youtube, instagram, twitch, o desactivado)
 - **Caché inteligente** por vídeo: evita reprocesar transcripciones, segmentos y datos faciales si no hay cambios
 - **Modo watcher** (`--watch`): monitoriza la carpeta de entrada y procesa nuevos vídeos automáticamente
 - **Publicación automática** a YouTube Shorts y TikTok con soporte de programación horaria
@@ -492,7 +492,7 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 | Parámetro | Descripción |
 |---|---|
-| `mode` | Perfil de censura activo: `"tiktok"`, `"youtube"`, `"instagram"`, `"twitch"` |
+| `mode` | Perfil de censura activo: `"tiktok"`, `"youtube"`, `"instagram"`, `"twitch"`, `"desactivado"`. Con `"desactivado"` no se censura ninguna palabra ni se aplica pitido |
 | `custom_words` | Lista adicional de palabras a censurar |
 | `beep_frequency_hz` | Frecuencia del pitido de censura en Hz |
 
@@ -518,6 +518,20 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 
 Cambiar el modelo según disponibilidad en Google AI Studio. La clave API siempre va en la variable de entorno `GEMINI_API_KEY`.
 
+### `ai_features`
+
+```json
+{
+  "multimodal_video": false,
+  "multimodal_interval_sec": 10
+}
+```
+
+| Parámetro | Descripción |
+|---|---|
+| `multimodal_video` | Si `true`, extrae frames JPEG del stream y los envía inline junto a la transcripción en la llamada a Gemini del Paso 2. Permite detectar momentos virales también por contexto visual. Compatible con el tier gratuito (sin Files API). Incluye reintentos automáticos ante rate limit (5 intentos × 10 s) |
+| `multimodal_interval_sec` | Cada cuántos segundos del stream se extrae un frame. Valor por defecto: `10`. Valores más bajos = más contexto visual pero más tokens. Rango recomendado: 5–60 s |
+
 ### `gpu`
 
 ```json
@@ -533,6 +547,26 @@ Cambiar el modelo según disponibilidad en Google AI Studio. La clave API siempr
 | `force_cpu` | Forzar procesamiento en CPU (deshabilita CUDA) |
 | `ffmpeg_encoder_override` | Forzar encoder FFmpeg concreto (ej. `"libx264"` para CPU) |
 | `torch_device_override` | Forzar dispositivo torch (ej. `"cpu"`) |
+
+### `output`
+
+```json
+{
+  "resolution_w": 1080,
+  "resolution_h": 1920,
+  "fps": 60,
+  "audio_codec": "aac",
+  "orientation": "vertical",
+  "naming_pattern": "{source_name}_clip_{n}.mp4"
+}
+```
+
+| Parámetro | Descripción |
+|---|---|
+| `resolution_w/h` | Resolución de salida. Por defecto 1080×1920 (vertical 9:16) |
+| `fps` | FPS del vídeo de salida |
+| `orientation` | `"vertical"` — aplica composición 9:16 con webcam overlay (Paso 5). `"horizontal"` — omite la composición y conserva el vídeo en su resolución original; la resolución del ASS de subtítulos se auto-detecta con ffprobe |
+| `naming_pattern` | Patrón de nombre de los clips finales. Variables disponibles: `{source_name}`, `{n}` |
 
 ---
 
@@ -613,13 +647,14 @@ El pipeline se divide en 8 pasos controlables con `--max-step`. Cada paso usa la
 - Envía la transcripción completa al modelo Gemini configurado
 - Gemini identifica los momentos con mayor narrativa, emoción o humor
 - Devuelve segmentos con rango de tiempo, puntuación (0.0–1.0) y descripción
+- **Con `ai_features.multimodal_video = true`**: además de la transcripción, extrae frames JPEG (480px) del stream cada `multimodal_interval_sec` segundos (por defecto 10 s) y los envía **inline** junto al prompt (sin Files API — compatible con el tier gratuito). Gemini puede así detectar momentos virales también por contexto visual (gameplay, reacciones en pantalla, etc.). Si algún frame falla se omite sin interrumpir. En caso de rate limit del tier gratuito, reintenta automáticamente hasta 5 veces con 10 s de espera. El intervalo es configurable desde la UI (Pestaña 5 — Configuración).
 
 **Sin `GEMINI_API_KEY` (fallback automático):**
 - Analiza el audio del vídeo: picos de energía RMS y velocidad de habla (palabras/segundo)
 - Detecta menciones de `viral_keywords` en la transcripción
 - Pondera señales: `audio_peak × 0.45 + speech_speed × 0.35 + keywords × 0.20`
 
-Los segmentos pueden ser **multi-fragmento**: varios rangos de tiempo discontinuos que se concatenan en un solo clip.
+Los segmentos pueden ser **multi-fragmento**: varios rangos de tiempo discontinuos que se concatenan en un solo clip. Los fragmentos dentro de un mismo clip se ordenan por tiempo y no pueden solaparse entre sí (se descarta el solapante posterior).
 
 Resultado cacheado en `segments.json`.
 
@@ -639,13 +674,19 @@ Resultado cacheado en `segments.json`.
 - **Detección modo conducción**: analiza el HUD de GTA (componentes blancos del velocímetro/minimapa) para determinar si el jugador va en vehículo. Se puede deshabilitar con `layout.detect_driving = false`
 - Resultado cacheado en `face_{clip_stem}.json` con flag `is_driving`
 
-### Paso 5 — Composición 9:16 dinámica
+### Paso 5 — Composición dinámica
 
+**Modo vertical (`output.orientation = "vertical"`, por defecto):**
 - Redimensiona el gameplay a 1080×1920 (zoom configurable)
 - Superpone la webcam en la posición calibrada cuando la cara está visible
 - Genera animación neon del nombre del streamer (barrido de color, configurable)
 - Modo conducción activo: ajusta el offset horizontal del gameplay para centrar el HUD del vehículo
 - Procesado completamente por FFmpeg con h264_nvenc (GPU)
+
+**Modo horizontal (`output.orientation = "horizontal"`):**
+- Omite toda la composición; el clip extraído en bruto se usa directamente
+- La resolución del vídeo de salida es la del stream original
+- El `.ass` de subtítulos del Paso 6 se genera con las dimensiones reales del vídeo (auto-detectadas con ffprobe)
 
 ### Paso 6 — Censura + subtítulos + render final
 
@@ -716,8 +757,10 @@ Requiere haber ejecutado al menos el **Paso 2** para que existan segmentos en ca
 - Para cada clip detectado:
   - **Vista previa** generada bajo demanda con FFmpeg GPU (o CPU como fallback)
   - Score viral y descripción de Gemini
-  - **Slider de ajuste** de tiempos de inicio/fin (`±30 s`)
-  - Para clips multi-fragmento: slider independiente por cada fragmento (`±10 s`)
+  - **Gestión de fragmentos** (fuera del formulario, con efecto inmediato):
+    - Lista de fragmentos con tiempo de inicio/fin y botón **✕** para eliminar (deshabilitado si solo queda 1)
+    - Botón **➕ Añadir fragmento** que añade un rango nuevo al final del último fragmento
+  - **Sliders de ajuste** por fragmento: rango completo del vídeo original (0 s → duración total), calculado con ffprobe al cargar el vídeo
   - **Checkboxes de publicación**: YouTube Shorts, TikTok
   - **Programación horaria**: selector de fecha y hora para publicación diferida
 - Formulario de guardado que actualiza la caché de segmentos con los ajustes
@@ -748,10 +791,10 @@ Permite editar todos los parámetros del pipeline sin tocar `config.json` direct
 | **Whisper** | Modelo (`tiny` → `large-v3`), idioma, tipo de cómputo |
 | **Detección viral** | Duraciones mín/máx, buffers, intro/outro, nº máximo de clips, keywords virales |
 | **Subtítulos** | Fuente, tamaño, outline, posición vertical, ancho máximo de línea, offset de sincronía |
-| **Censura** | Perfil activo, frecuencia del bip, palabras adicionales |
-| **IA — Gemini** | Modelo Gemini, análisis multimodal de vídeo |
+| **Censura** | Perfil activo (`tiktok`, `youtube`, `instagram`, `twitch`, `desactivado`), frecuencia del bip, palabras adicionales |
+| **IA — Gemini** | Modelo Gemini, toggle multimodal + intervalo de frames configurable (5–120 s, inline, tier gratuito) |
 | **GPU / Hardware** | Forzar CPU, deshabilitar CUDA |
-| **Salida** | FPS de salida, patrón de nombre de archivo |
+| **Salida** | Formato de salida (`Vertical 9:16` / `Horizontal 16:9`), FPS, patrón de nombre de archivo |
 
 ---
 
@@ -866,5 +909,6 @@ Desde la UI: **Pestaña 3 — Caché** para borrado granular o total.
 - El pipeline completo de un stream de 30 minutos tarda aproximadamente 8–15 minutos en una RTX 4080 Super
 - La transcripción con Whisper `large-v3` es el paso más lento (~5–8 min para 30 min de vídeo); reducir a `medium` o `small` si la velocidad es prioritaria
 - La diarización con Pyannote añade ~3–5 minutos adicionales; desactivar si no se necesitan colores por locutor (poner `transcriber.diarization_enabled: false` en config o en la Pestaña 5 — Configuración)
+- El análisis multimodal (`ai_features.multimodal_video`) añade ~1–3 minutos extra (extracción de frames con FFmpeg + tokens adicionales de imagen); desactivar si se prioriza velocidad sobre calidad de detección visual
 - Los Pasos 3–6 (extracción, composición, render) se benefician directamente de NVDEC + NVENC
 - El modo `--max-step 2` permite revisar los clips en la UI antes de renderizar, evitando renders innecesarios

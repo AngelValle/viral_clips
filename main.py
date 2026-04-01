@@ -315,13 +315,18 @@ def process_video(video_path: Path, config: dict, use_cache: bool = True, max_st
                     if not detect_driving:
                         is_driving = False
 
-            # ── PASO 5: Composición 9:16 ──────────────────────────────────────
+            # ── PASO 5: Composición 9:16 (omitir si formato horizontal) ──────
             if max_step < 5:
                 continue
-            logger.info("PASO 5/8 — Composición 9:16 dinámica")
-            composed = tmp / "composed.mp4"
-            compose_dynamic(raw_clip, face_data, config, composed,
-                            is_driving=is_driving)
+            orientation = config.get("output", {}).get("orientation", "vertical")
+            composed    = tmp / "composed.mp4"
+            if orientation == "horizontal":
+                logger.info("PASO 5/8 — Formato horizontal, omitiendo composición 9:16")
+                shutil.copy2(raw_clip, composed)
+            else:
+                logger.info("PASO 5/8 — Composición 9:16 dinámica")
+                compose_dynamic(raw_clip, face_data, config, composed,
+                                is_driving=is_driving)
 
             # ── PASO 6: Censura + subtítulos + render final ───────────────────
             if max_step < 6:
@@ -365,9 +370,27 @@ def process_video(video_path: Path, config: dict, use_cache: bool = True, max_st
                 if w["start"] < _clip_dur
             ]
 
+            # Para horizontal, sobrescribir la resolución con la real del vídeo compuesto
+            if orientation == "horizontal":
+                try:
+                    _vp = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-print_format", "json",
+                         "-show_streams", "-select_streams", "v:0", str(composed)],
+                        capture_output=True, text=True,
+                    )
+                    _vs = json.loads(_vp.stdout)["streams"][0]
+                    _eff_out = {**config["output"],
+                                "resolution_w": _vs["width"],
+                                "resolution_h": _vs["height"]}
+                    _eff_config = {**config, "output": _eff_out}
+                except Exception:
+                    _eff_config = config
+            else:
+                _eff_config = config
+
             if config.get("subtitles", {}).get("enabled", True):
-                ass_file = generate_subtitles(sub_words, config, tmp, clip_stem)
-                embed_subtitles(censored_audio, ass_file, final_path, config)
+                ass_file = generate_subtitles(sub_words, _eff_config, tmp, clip_stem)
+                embed_subtitles(censored_audio, ass_file, final_path, _eff_config)
             else:
                 logger.info("PASO 6/8 — Subtítulos deshabilitados, copiando sin .ass")
                 shutil.copy2(censored_audio, final_path)

@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
+import time
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -38,8 +40,46 @@ def _get_safety_settings():
     ]
 
 
-def _call_gemini(prompt: str, config: dict,
-                 max_tokens: int = 4096) -> Optional[str]:
+def _extract_frames(
+    video_path: Path,
+    video_duration: float,
+    tmp_dir: Path,
+    interval_sec: float = 10.0,
+) -> List[tuple]:
+    """
+    Extrae 1 frame cada `interval_sec` segundos con FFmpeg.
+    JPEG 480px ancho, calidad baja (~15-30 KB c/u) para minimizar tokens.
+    Compatible con el tier gratuito de Gemini (sin Files API).
+    Devuelve [(timestamp_float, Path), ...].
+    """
+    frames = []
+    t = interval_sec / 2.0
+    while t < video_duration:
+        out = tmp_dir / f"frame_{int(t):06d}s.jpg"
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(t), "-i", str(video_path),
+             "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "8", str(out)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if r.returncode == 0 and out.exists():
+            frames.append((t, out))
+        t += interval_sec
+    return frames
+
+
+def _call_gemini(
+    prompt: str,
+    config: dict,
+    max_tokens: int = 4096,
+    frames: Optional[List[tuple]] = None,
+    max_retries: int = 5,
+    retry_wait: float = 10.0,
+) -> Optional[str]:
+    """
+    Llama a Gemini con reintentos para el tier gratuito (rate limit 15 RPM).
+    Si se pasan `frames`, construye una request multimodal con imágenes inline
+    (sin Files API — compatible con el tier gratuito).
+    """
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         logger.warning("GEMINI_API_KEY no encontrada en el entorno")
@@ -47,25 +87,50 @@ def _call_gemini(prompt: str, config: dict,
 
     model = config.get("gemini", {}).get("model", "gemini-3.1-flash-lite-preview")
 
-    try:
-        from google import genai
-        from google.genai import types as genai_types
+    from google import genai
+    from google.genai import types as genai_types
 
-        client   = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model,
-            contents=[prompt],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=max_tokens,
-                safety_settings=_get_safety_settings(),
-                response_mime_type="application/json",
-            ),
-        )
-        return response.text
-    except Exception as exc:
-        logger.warning(f"Gemini API error: {exc}")
-        return None
+    client = genai.Client(api_key=api_key)
+
+    if frames:
+        # Multimodal: frames como bytes inline + timestamp + prompt al final
+        parts = []
+        for t, img_path in frames:
+            parts.append(genai_types.Part.from_bytes(
+                data=img_path.read_bytes(), mime_type="image/jpeg",
+            ))
+            parts.append(genai_types.Part(text=f"[Frame en t={t:.0f}s]"))
+        parts.append(genai_types.Part(text=prompt))
+        contents = [genai_types.Content(parts=parts, role="user")]
+    else:
+        contents = [prompt]
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=max_tokens,
+                    safety_settings=_get_safety_settings(),
+                    response_mime_type="application/json",
+                ),
+            )
+            return response.text
+        except Exception as exc:
+            err = str(exc)
+            is_rate_limit = any(k in err for k in ("429", "quota", "RESOURCE_EXHAUSTED", "rate"))
+            if is_rate_limit and attempt < max_retries:
+                logger.warning(
+                    f"Gemini rate limit (intento {attempt}/{max_retries}). "
+                    f"Reintentando en {retry_wait:.0f}s..."
+                )
+                time.sleep(retry_wait)
+            else:
+                logger.warning(f"Gemini API error (intento {attempt}): {exc}")
+                return None
+    return None
 
 
 # ── Prompt principal ──────────────────────────────────────────────────────────
@@ -213,9 +278,10 @@ def _parse_gemini_segments(response: str, words: List[Dict],
         except (KeyError, ValueError, TypeError):
             continue
 
-        # Validar y limpiar fragmentos
+        # Validar y limpiar fragmentos (ordenados por inicio para detección de solapamiento)
+        raw_frags_sorted = sorted(raw_frags, key=lambda f: float(f.get("start", 0)))
         valid_frags = []
-        for frag in raw_frags:
+        for frag in raw_frags_sorted:
             try:
                 fs = max(valid_start, float(frag["start"]) - pre_buf)
                 fe = min(valid_end,   float(frag["end"])   + post_buf)
@@ -229,6 +295,11 @@ def _parse_gemini_segments(response: str, words: List[Dict],
             # Solapamiento con fragmentos ya usados en otros clips
             if any(not (fe <= u[0] or fs >= u[1]) for u in used):
                 logger.debug(f"Fragmento {fs:.1f}-{fe:.1f}s solapado con otro clip, omitido")
+                continue
+
+            # Solapamiento con fragmentos del mismo clip (evita contenido repetido)
+            if any(not (fe <= vf[0] or fs >= vf[1]) for vf in valid_frags):
+                logger.debug(f"Fragmento {fs:.1f}-{fe:.1f}s solapado dentro del mismo clip, omitido")
                 continue
 
             valid_frags.append((round(fs, 2), round(fe, 2)))
@@ -409,11 +480,28 @@ def detect_viral_moments(
         return []
 
     if has_gemini:
-        logger.info(f"Detección viral con Gemini ({len(valid_words)} palabras, "
-                    f"{video_duration/60:.1f} min de directo)...")
+        multimodal = config.get("ai_features", {}).get("multimodal_video", False)
+        frames     = []
+        _tmp_obj   = None
+
+        if multimodal:
+            interval_sec = float(config.get("ai_features", {}).get("multimodal_interval_sec", 10))
+            _tmp_obj = tempfile.mkdtemp()
+            tmp_path = Path(_tmp_obj)
+            logger.info(f"Multimodal: extrayendo frames del vídeo (1 cada {interval_sec:.0f}s)...")
+            frames = _extract_frames(video_path, video_duration, tmp_path, interval_sec=interval_sec)
+            logger.info(f"Multimodal: {len(frames)} frames extraídos para análisis visual")
+
+        logger.info(f"Detección viral con Gemini{'  + visión' if frames else ''} "
+                    f"({len(valid_words)} palabras, {video_duration/60:.1f} min)...")
 
         prompt   = _build_viral_prompt(valid_words, config, video_duration)
-        response = _call_gemini(prompt, config, max_tokens=4096)
+        response = _call_gemini(prompt, config, max_tokens=4096,
+                                frames=frames if frames else None)
+
+        if _tmp_obj:
+            import shutil as _shutil
+            _shutil.rmtree(_tmp_obj, ignore_errors=True)
 
         if response is not None:
             segments = _parse_gemini_segments(

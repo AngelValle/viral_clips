@@ -146,11 +146,38 @@ def transcribe(video_path: Path, config: dict) -> List[Dict[str, Any]]:
             waveform = _torch.from_numpy(_audio[_np.newaxis, :])
             diarization = pipeline({"waveform": waveform, "sample_rate": _sr})
 
+            # Extraer el objeto Annotation compatible con cualquier versión de pyannote:
+            #   - pyannote < 3.3  → devuelve Annotation directamente
+            #   - pyannote ≥ 3.3  → devuelve DiarizeOutput (namedtuple/dataclass)
+            #     con el Annotation en algún campo (buscar el que tenga itertracks)
+            if hasattr(diarization, "itertracks"):
+                annotation = diarization
+            elif hasattr(diarization, "diarization") and hasattr(diarization.diarization, "itertracks"):
+                annotation = diarization.diarization
+            elif hasattr(diarization, "_fields"):
+                annotation = next(
+                    (getattr(diarization, f) for f in diarization._fields
+                     if hasattr(getattr(diarization, f, None), "itertracks")),
+                    None,
+                )
+            else:
+                annotation = None
+
+            if annotation is None:
+                raise ValueError(f"No se pudo extraer Annotation de {type(diarization).__name__}")
+
+            # Construir lista plana (start, end, speaker) para lookup eficiente
+            speaker_segments = [
+                (turn.start, turn.end, spk)
+                for turn, _, spk in annotation.itertracks(yield_label=True)
+            ]
+
             for w in words:
                 mid = w["start"] + (w["end"] - w["start"]) / 2
-                labels = diarization.crop(mid, mid + 0.01).labels()
-                if labels:
-                    w["speaker"] = labels[0]
+                for seg_start, seg_end, spk in speaker_segments:
+                    if seg_start <= mid <= seg_end:
+                        w["speaker"] = spk
+                        break
 
             logger.info("Diarización completada. Locutores asignados.")
         except Exception as exc:
