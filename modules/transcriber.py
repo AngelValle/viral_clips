@@ -195,24 +195,32 @@ def words_in_range(words: List[Dict], start: float, end: float) -> List[Dict]:
 def _split_into_phrases(words: List[Dict], max_chars: int) -> List[List[int]]:
     """
     Agrupa los índices de palabras en frases que caben en max_chars caracteres.
-    Una frase nueva empieza cuando añadir la siguiente palabra superaría max_chars.
+    Fuerza un corte de frase cuando:
+      - Añadir la siguiente palabra superaría max_chars, o
+      - Cambia el locutor (speaker distinto al de la palabra anterior).
+    Esto garantiza que ninguna frase mezcla palabras de distintos locutores.
     Devuelve lista de listas de índices: [[0,1,2,3], [4,5,6], ...]
     """
     phrases = []
     current = []
     current_len = 0
+    current_speaker = None
 
     for i, w in enumerate(words):
-        text = w.get("censored_text", w["word"])
+        text    = w.get("censored_text", w["word"])
+        speaker = w.get("speaker", "SPEAKER_00")
         # +1 por el espacio entre palabras
-        needed = len(text) + (1 if current else 0)
-        if current and current_len + needed > max_chars:
+        needed  = len(text) + (1 if current else 0)
+        speaker_changed = current_speaker is not None and speaker != current_speaker
+        if current and (current_len + needed > max_chars or speaker_changed):
             phrases.append(current)
-            current     = [i]
-            current_len = len(text)
+            current         = [i]
+            current_len     = len(text)
+            current_speaker = speaker
         else:
             current.append(i)
-            current_len += needed
+            current_len    += needed
+            current_speaker = speaker
 
     if current:
         phrases.append(current)

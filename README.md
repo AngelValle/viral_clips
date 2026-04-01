@@ -746,8 +746,9 @@ Ejecutar con `iniciar.bat` o `streamlit run ui.py`. Disponible en `http://localh
 
 - Lista todos los vídeos disponibles en `input_dir`
 - Para cada vídeo: checkbox de procesamiento + selector del paso máximo (1–8)
-- Lanzar procesamiento en secuencia con salida en tiempo real en el Pipeline Log
+- Lanzar procesamiento en secuencia con salida en tiempo real en el **Pipeline Log**
 - El Pipeline Log tiene auto-scroll al fondo (CSS `flex-direction: column-reverse`, sin JavaScript)
+- **Barra de progreso** bajo el log: muestra el vídeo actual (`X/Y: nombre.mp4`), el paso en curso (`PASO X/8 — nombre`) y una barra proporcional. Se actualiza en tiempo real y desaparece al terminar todas las tareas
 
 ### Pestaña 2 — Revisión y Publicación
 

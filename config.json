@@ -109,7 +109,7 @@
     "move_processed": true
   },
   "transcriber": {
-    "diarization_enabled": false
+    "diarization_enabled": true
   },
   "layout": {
     "detect_driving": true,

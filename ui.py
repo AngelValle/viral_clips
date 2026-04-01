@@ -40,6 +40,8 @@ if "global_log" not in st.session_state:
     st.session_state["global_log"] = []
 if "running" not in st.session_state:
     st.session_state["running"] = False
+if "progress_info" not in st.session_state:
+    st.session_state["progress_info"] = {"step": 0, "max_step": 8, "video": "", "video_idx": 0, "total_videos": 0}
 
 def _append_log(line: str):
     st.session_state["global_log"].append(line)
@@ -94,7 +96,56 @@ def _render_log_md(lines):
 <div id="pipeline-log-scroll" style="max-height:380px;overflow-y:auto;padding:8px 0;display:flex;flex-direction:column-reverse">{rows_html}</div>
 </div>"""
 
-def _run_with_log(cmd: list, log_placeholder):
+_PASO_NAMES = {
+    1: "Transcripción Whisper",
+    2: "Detección Viral",
+    3: "Extracción de Segmentos",
+    4: "Detección Facial",
+    5: "Composición Visual",
+    6: "Censura + Subtítulos + Render",
+    7: "Metadatos con IA",
+    8: "Auto-Publicación",
+}
+
+def _update_progress(line: str):
+    m = _re.search(r'PASO\s+(\d+)/(\d+)', line)
+    if m:
+        st.session_state["progress_info"]["step"]     = int(m.group(1))
+        st.session_state["progress_info"]["max_step"] = int(m.group(2))
+
+def _render_progress_html() -> str:
+    info      = st.session_state.get("progress_info", {})
+    step      = info.get("step", 0)
+    max_step  = info.get("max_step", 8)
+    video     = info.get("video", "")
+    video_idx = info.get("video_idx", 0)
+    total     = info.get("total_videos", 0)
+
+    if step == 0 and not st.session_state.get("running"):
+        return ""
+
+    pct        = step / max_step if max_step > 0 else 0
+    bar_w      = int(pct * 100)
+    paso_label = _PASO_NAMES.get(step, f"Paso {step}") if step > 0 else "Esperando..."
+    video_label = (f"Vídeo {video_idx}/{total}: {_html.escape(video)}"
+                   if total > 0 else _html.escape(video))
+
+    return (
+        f'<div style="background:#0f1117;border-radius:8px;border:1px solid #2a2d3a;'
+        f'padding:10px 16px;margin-top:4px">'
+        f'<div style="display:flex;justify-content:space-between;margin-bottom:7px">'
+        f'<span style="color:#82aaff;font-size:12px;font-family:monospace">{video_label}</span>'
+        f'<span style="color:#8b8fa8;font-size:12px;font-family:monospace">'
+        f'PASO {step}/{max_step} — {paso_label}</span>'
+        f'</div>'
+        f'<div style="background:#1e2030;border-radius:4px;height:6px;overflow:hidden">'
+        f'<div style="background:linear-gradient(90deg,#4466cc,#82aaff);'
+        f'width:{bar_w}%;height:100%;border-radius:4px"></div>'
+        f'</div>'
+        f'</div>'
+    )
+
+def _run_with_log(cmd: list, log_placeholder, progress_placeholder=None):
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
@@ -102,7 +153,10 @@ def _run_with_log(cmd: list, log_placeholder):
                           text=True, encoding="utf-8", errors="replace", env=env) as proc:
         for line in proc.stdout:
             _append_log(line.rstrip())
+            _update_progress(line.rstrip())
             log_placeholder.markdown(_render_log_md(st.session_state["global_log"]), unsafe_allow_html=True)
+            if progress_placeholder is not None:
+                progress_placeholder.markdown(_render_progress_html(), unsafe_allow_html=True)
     return proc.returncode
 
 # ── Log único — debe estar definido antes de cualquier tab que lo use ─────────
@@ -116,6 +170,8 @@ with _btn_col:
         st.rerun()
 LOG_PLACEHOLDER = st.empty()
 LOG_PLACEHOLDER.markdown(_render_log_md(st.session_state["global_log"]), unsafe_allow_html=True)
+PROGRESS_PLACEHOLDER = st.empty()
+PROGRESS_PLACEHOLDER.markdown(_render_progress_html(), unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -320,7 +376,7 @@ with tab_lanzador:
         1: "1. Solo Transcribir (Whisper)",
         2: "2. Detección Viral (Recomendado para revisar luego)",
         3: "3. Extraer Segmentos Crudos",
-        5: "5. Composición 9:16 Visual",
+        5: "5. Composición Visual",
         7: "7. Render Final + Metadatos",
         8: "8. Pipeline Completo (Hasta Auto-Publicación)"
     }
@@ -348,10 +404,16 @@ with tab_lanzador:
             st.error("No has marcado ningún vídeo para procesar.")
         else:
             st.session_state["running"] = True
-            for video_file, max_step in tareas_a_ejecutar.items():
+            _total = len(tareas_a_ejecutar)
+            for _idx, (video_file, max_step) in enumerate(tareas_a_ejecutar.items(), 1):
+                st.session_state["progress_info"] = {
+                    "step": 0, "max_step": max_step,
+                    "video": video_file.name,
+                    "video_idx": _idx, "total_videos": _total,
+                }
                 _append_log(f"▶ Iniciando: {video_file.name} (paso {max_step})")
                 cmd = ["python", "-u", "main.py", "--file", str(video_file.resolve()), "--max-step", str(max_step)]
-                rc = _run_with_log(cmd, LOG_PLACEHOLDER)
+                rc = _run_with_log(cmd, LOG_PLACEHOLDER, PROGRESS_PLACEHOLDER)
                 if rc != 0:
                     _append_log(f"❌ Falló: {video_file.name} (código {rc})")
                     st.error(f"❌ Error en {video_file.name} (código {rc})")
@@ -359,6 +421,8 @@ with tab_lanzador:
                     _append_log(f"✅ Completado: {video_file.name}")
                     st.success(f"✅ {video_file.name} completado.")
             st.session_state["running"] = False
+            st.session_state["progress_info"] = {"step": 0, "max_step": 8, "video": "", "video_idx": 0, "total_videos": 0}
+            PROGRESS_PLACEHOLDER.empty()
             st.success("🎉 ¡Todas las tareas han finalizado!")
 
 # ==========================================
