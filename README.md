@@ -1,6 +1,6 @@
-# Viral Clips AI — Pipeline GPU para Streamers
+# Videos2ViralShort — Obtener clips/short desde videos/directos
 
-Pipeline automatizado para extraer, editar y publicar clips virales de streams de GTA V en formato vertical 9:16 (TikTok/YouTube Shorts). Transcripción con Whisper, detección viral con Gemini AI o señales de audio, composición GPU con FFmpeg NVENC y subtítulos estilo TikTok con karaoke.
+Pipeline automatizado para extraer, editar y publicar clips virales de streams/videos en formato vertical 9:16 (TikTok/YouTube Shorts) y horizontal 16:9. Transcripción con Whisper, detección viral con Gemini AI o señales de audio, composición GPU con FFmpeg NVENC y subtítulos estilo TikTok con karaoke.
 
 ---
 
