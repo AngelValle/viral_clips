@@ -1,20 +1,17 @@
 """
 transcriber.py
-Transcribe el audio de un vídeo usando faster-whisper (CTranslate2).
-Mismo motor que Purfview's Faster-Whisper-XXL, accesible como librería Python.
-
-Ventajas frente a openai-whisper:
-  - 2-4x más rápido en GPU
-  - Menor uso de VRAM (cuantización int8/float16)
-  - Mismo modelo large-v3
-
-Instalación (si no está ya):
-  pip install faster-whisper --break-system-packages
+Transcribe el audio de un vídeo usando faster-whisper (CTranslate2) + diarización Pyannote.
 """
 
+import gc
 import logging
+import os
+import re
+import subprocess
+import tempfile
+import warnings
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +80,7 @@ def transcribe(video_path: Path, config: dict) -> List[Dict[str, Any]]:
                 "start":      round(w.start, 3),
                 "end":        round(w.end,   3),
                 "confidence": round(w.probability, 3),
+                "speaker":    "SPEAKER_00",
             })
 
     logger.info(
@@ -91,13 +89,71 @@ def transcribe(video_path: Path, config: dict) -> List[Dict[str, Any]]:
     )
 
     del model
+    gc.collect()
     try:
-        import torch, gc
+        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        gc.collect()
     except Exception:
         pass
+
+    # ── Diarización de locutores (opcional, requiere HF_TOKEN en el entorno) ───
+    hf_token = os.environ.get("HF_TOKEN", "").strip()
+    if hf_token:
+        try:
+            # Silenciar warnings ruidosos de pyannote/torch que no son errores
+            warnings.filterwarnings("ignore", message="torchcodec is not installed")
+            warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+            warnings.filterwarnings("ignore", message="std\\(\\): degrees of freedom")
+
+            logger.info("Iniciando diarización de locutores (Pyannote)...")
+            from pyannote.audio import Pipeline
+            import torch
+
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1", token=hf_token
+                )
+            except TypeError:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1", use_auth_token=hf_token
+                )
+
+            if torch.cuda.is_available():
+                pipeline.to(torch.device("cuda"))
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                wav_path = tmp.name
+
+            logger.info("Extrayendo pista de audio para diarización...")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(video_path),
+                 "-ar", "16000", "-ac", "1", wav_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+            import wave as _wave
+            import numpy as _np
+            import torch as _torch
+            with _wave.open(wav_path, "rb") as _wf:
+                _sr     = _wf.getframerate()
+                _raw    = _wf.readframes(_wf.getnframes())
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+            # FFmpeg extrae mono 16-bit PCM → float32 normalizado, shape (1, time)
+            _audio   = _np.frombuffer(_raw, dtype=_np.int16).astype(_np.float32) / 32768.0
+            waveform = _torch.from_numpy(_audio[_np.newaxis, :])
+            diarization = pipeline({"waveform": waveform, "sample_rate": _sr})
+
+            for w in words:
+                mid = w["start"] + (w["end"] - w["start"]) / 2
+                labels = diarization.crop(mid, mid + 0.01).labels()
+                if labels:
+                    w["speaker"] = labels[0]
+
+            logger.info("Diarización completada. Locutores asignados.")
+        except Exception as exc:
+            logger.warning(f"Diarización fallida ({exc}). Se usa un solo locutor.")
 
     return words
 
@@ -167,26 +223,102 @@ def build_highlighted_entries(
     entries  = []
 
     for phrase_indices in phrases:
-        # Construir el texto base de la frase (sin highlight)
-        phrase_words = [words[i] for i in phrase_indices]
+        main_speaker = words[phrase_indices[0]].get("speaker", "SPEAKER_00")
 
-        for active_pos, active_idx in enumerate(phrase_indices):
+        for active_idx in phrase_indices:
             active_word = words[active_idx]
 
-            # Construir la línea con highlight solo en la palabra activa
             parts = []
-            for pos, idx in enumerate(phrase_indices):
+            for idx in phrase_indices:
                 text = words[idx].get("censored_text", words[idx]["word"])
                 if idx == active_idx:
                     parts.append(f"<u>{text}</u>")
                 else:
                     parts.append(text)
 
-            line = " ".join(parts).strip()
             entries.append({
-                "start": active_word["start"],
-                "end":   active_word["end"],
-                "text":  line,
+                "start":   active_word["start"],
+                "end":     active_word["end"],
+                "text":    " ".join(parts).strip(),
+                "speaker": main_speaker,
             })
 
     return entries
+
+
+# ── Generación de subtítulos ASS ─────────────────────────────────────────────
+
+# Paleta de colores BGR Hex para ASS (Blanco, Amarillo, Verde claro, Cian, Rosa)
+SPEAKER_COLORS = ["&H00FFFFFF", "&H0000FFFF", "&H00B2FF66", "&H00FFFF00", "&H00FF99FF"]
+
+
+def _ass_time(s: float) -> str:
+    h, m, sec = int(s // 3600), int((s % 3600) // 60), s % 60
+    return f"{h}:{m:02d}:{sec:05.2f}"
+
+
+def _convert_highlight_tags(text: str, base_color: str) -> str:
+    """La palabra activa se renderiza en rojo; el resto usa el color del locutor."""
+    text = re.sub(
+        r"<u>(.*?)</u>",
+        lambda m: f"{{\\c&H0000FF&}}{m.group(1)}{{\\c{base_color}}}",
+        text,
+    )
+    return re.sub(r"<[^>]+>", "", text)
+
+
+def write_ass(entries: List[Dict[str, Any]], output_path: Path, config: Dict[str, Any]) -> Path:
+    """Genera un archivo .ass con estilo TikTok y colores por locutor."""
+    cfg_s  = config["subtitles"]
+    cfg_o  = config["output"]
+    res_w, res_h  = cfg_o["resolution_w"], cfg_o["resolution_h"]
+    font_size     = cfg_s["font_size"]
+    outline_w     = cfg_s["outline_width"]
+    pos_y         = int(res_h * cfg_s["position_y_ratio"])
+    font_name     = cfg_s.get("font_name", "Showcard Gothic")
+
+    header = (
+        f"[Script Info]\nScriptType: v4.00+\n"
+        f"PlayResX: {res_w}\nPlayResY: {res_h}\nWrapStyle: 1\n\n"
+        f"[V4+ Styles]\n"
+        f"Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV\n"
+        f"Style: TikTok,{font_name},{font_size},&H00FFFFFF,&H00000000,&H00000000,1,0,1,{outline_w},0,2,60,60,60\n\n"
+        f"[Events]\n"
+        f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    speaker_map: Dict[str, str] = {}
+    color_idx = 0
+    event_lines = []
+
+    for e in entries:
+        spk = e.get("speaker", "SPEAKER_00")
+        if spk not in speaker_map:
+            speaker_map[spk] = SPEAKER_COLORS[color_idx % len(SPEAKER_COLORS)]
+            color_idx += 1
+
+        base_color = speaker_map[spk]
+        text       = _convert_highlight_tags(e["text"], base_color)
+        event_lines.append(
+            f"Dialogue: 0,{_ass_time(e['start'])},{_ass_time(e['end'])},"
+            f"TikTok,,0,0,0,,"
+            f"{{\\an2\\pos({res_w // 2},{pos_y})}}{{\\c{base_color}}}{text}"
+        )
+
+    output_path.write_text(header + "\n".join(event_lines) + "\n", encoding="utf-8")
+    return output_path
+
+
+def generate_subtitles(
+    words: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    output_dir: Path,
+    clip_name: str,
+) -> Path:
+    """Orquesta build_highlighted_entries → write_ass y devuelve la ruta del .ass."""
+    entries = build_highlighted_entries(
+        words,
+        max_line_width=config["subtitles"].get("max_line_width", 20),
+        max_line_count=config["subtitles"].get("max_line_count", 1),
+    )
+    return write_ass(entries, output_dir / f"{clip_name}.ass", config)

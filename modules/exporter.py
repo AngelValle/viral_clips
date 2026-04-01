@@ -11,11 +11,12 @@ Usa encoder hardware (NVENC/VideoToolbox/AMF) cuando está disponible.
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from modules.gpu_utils import get_ffmpeg_hwaccel
 
@@ -51,10 +52,13 @@ def extract_segment(
         fs = fragments[0]["start"]
         fe = fragments[0]["end"]
         duration = round(fe - fs, 3)
+        use_nvdec = ["-hwaccel", "cuda"] if hw.get("hwaccel") == "cuda" else []
 
         def build_simple(encoder, extra_args):
-            return [
-                "ffmpeg", "-y",
+            cmd = ["ffmpeg", "-y"]
+            if use_nvdec and encoder == hw["encoder"]:
+                cmd += use_nvdec
+            cmd += [
                 "-accurate_seek",
                 "-ss", str(fs),
                 "-i", str(source_path),
@@ -64,6 +68,7 @@ def extract_segment(
                 "-avoid_negative_ts", "make_zero",
                 str(output_path),
             ]
+            return cmd
 
         result = subprocess.run(
             build_simple(hw["encoder"], hw["extra_enc_args"]),
@@ -157,17 +162,6 @@ def _safe_ass_path(ass_path: Path) -> tuple:
     return ass_path, False
 
 
-def _build_ass_vf(ass_path: Path, res_w: int = 1080, res_h: int = 1920) -> str:
-    """
-    Construye el filtro -vf para embeber subtítulos ASS compatible con FFmpeg 8.x.
-    FFmpeg 8 requiere original_size=WxH para el filtro ass=.
-    """
-    import re
-    path_str = str(ass_path).replace("\\", "/")
-    # Escapar letra de unidad Windows: C:/ → C\:/
-    path_str = re.sub(r"^([A-Za-z]):", r"\1\\:", path_str)
-    return f"ass='{path_str}':original_size={res_w}x{res_h}"
-
 def embed_subtitles(
     video_path: Path,
     ass_path: Path,
@@ -187,7 +181,8 @@ def embed_subtitles(
 
     # Asegurar ruta sin caracteres problemáticos
     safe_ass, cleanup = _safe_ass_path(ass_path)
-    vf = _build_ass_vf(safe_ass, res_w=res_w, res_h=res_h)
+    path_str = re.sub(r"^([A-Za-z]):", r"\1\\:", str(safe_ass).replace("\\", "/"))
+    vf       = f"ass='{path_str}':original_size={res_w}x{res_h}"
 
     logger.info(f"Render final con encoder: {hw['encoder']} ({'GPU' if hw['is_hw'] else 'CPU'})")
 
@@ -264,6 +259,9 @@ def save_metadata(
         "word_count":     len(clip_words),
         "censored_words": [w["word"] for w in clip_words if w.get("censored")],
         "transcript":     " ".join(w.get("censored_text", w["word"]) for w in clip_words),
+        "publish_yt":     segment.get("publish_yt", False),
+        "publish_tk":     segment.get("publish_tk", False),
+        "schedule_time":  segment.get("schedule_time", None),
     }
     meta_path = metadata_dir / (output_path.stem + ".json")
     meta_path.write_text(
@@ -324,3 +322,90 @@ def remap_words_to_fragments(words: list, fragments: list) -> list:
                          "start": round(max(0.0, new_start), 3),
                          "end":   round(max(0.0, new_end),   3)})
     return remapped
+
+
+# ── Generación de metadata con IA (Gemini) ────────────────────────────────────
+
+def _call_gemini_metadata(prompt: str, config: Dict[str, Any]) -> str:
+    """Llama a Gemini para generar títulos/descripciones. Key desde variable de entorno."""
+    from google import genai
+    from google.genai import types as genai_types
+
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY no encontrada en el entorno del sistema.")
+
+    model    = config.get("gemini", {}).get("model", "gemini-3.1-flash-lite-preview")
+    client   = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=[prompt],
+        config=genai_types.GenerateContentConfig(temperature=0.7, max_output_tokens=1024),
+    )
+    return response.text
+
+
+def _write_readable_txt(metadata: Dict[str, Any], path: Path) -> None:
+    """Genera un .txt limpio para copiar y pegar en redes sociales."""
+    lines = [
+        f"═══ METADATA: {metadata.get('clip_name', '')} ═══",
+        f"Score viral: {metadata.get('viral_score', 0):.2f} | Duración: {metadata.get('duration_sec', 0):.0f}s\n",
+        "── TIKTOK ──────────────────────────────", "Títulos:",
+    ]
+    for i, t in enumerate(metadata.get("tiktok", {}).get("titulos", []), 1):
+        lines.append(f"  {i}. {t}")
+    lines += [f"\nDescripción:", f"  {metadata.get('tiktok', {}).get('descripcion', '')}\n",
+              "── YOUTUBE SHORTS ──────────────────────", "Títulos:"]
+    for i, t in enumerate(metadata.get("youtube_shorts", {}).get("titulos", []), 1):
+        lines.append(f"  {i}. {t}")
+    lines += [f"\nDescripción:", f"  {metadata.get('youtube_shorts', {}).get('descripcion', '')}\n",
+              "── HASHTAGS UNIVERSALES ────────────────",
+              "  " + " ".join(metadata.get("hashtags_universales", [])), "\n"]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def generate_clip_metadata(
+    transcript: str,
+    viral_score: float,
+    duration: float,
+    clip_name: str,
+    config: Dict[str, Any],
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """Genera títulos y descripciones para TikTok/YouTube vía Gemini con fallback."""
+    streamer    = config.get("claude", {}).get("streamer_name", "")
+    game        = config.get("claude", {}).get("game_name", "")
+    context_str = f"Streamer: {streamer} | Juego: {game}" if streamer or game else "contenido gaming"
+
+    prompt = (
+        f"Eres un experto en marketing gaming. Analiza esto y devuelve ÚNICAMENTE JSON VÁLIDO.\n"
+        f"CONTEXTO: {context_str} | DURACIÓN: {duration:.0f}s | SCORE VIRAL: {viral_score:.2f}\n"
+        f"TRANSCRIPT: {transcript[:600]}\n"
+        f'ESTRUCTURA EXACTA REQUERIDA:\n'
+        f'{{"tiktok":{{"titulos":["T1","T2","T3"],"descripcion":"Desc con hashtags"}},'
+        f'"youtube_shorts":{{"titulos":["T1","T2","T3"],"descripcion":"Desc"}},'
+        f'"hashtags_universales":["#H1","#H2"]}}'
+    )
+
+    try:
+        raw = _call_gemini_metadata(prompt, config).strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        metadata = json.loads(raw.strip())
+    except Exception:
+        game_ht  = f"#{game.replace(' ', '')}" if game else "#gaming"
+        metadata = {
+            "tiktok":          {"titulos": ["Momento épico 🔥"], "descripcion": f"Sígueme 👀 {game_ht} #clips"},
+            "youtube_shorts":  {"titulos": [f"Clip viral {game}"], "descripcion": f"Clip. {game_ht} #shorts"},
+            "hashtags_universales": ["#gaming", game_ht, "#viral"],
+        }
+
+    metadata.update({"clip_name": clip_name, "viral_score": viral_score, "duration_sec": duration})
+    (output_dir / f"{clip_name}_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _write_readable_txt(metadata, output_dir / f"{clip_name}_metadata.txt")
+    logger.info(f"Metadata IA generada: {clip_name}_metadata.json")
+    return metadata

@@ -9,10 +9,9 @@ cuantitativas (audio RMS + velocidad de habla + keywords).
 
 import json
 import logging
+import os
 import re
 import subprocess
-import urllib.request
-import urllib.error
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -22,59 +21,51 @@ from modules.gpu_utils import get_torch_device, free_gpu_memory
 logger = logging.getLogger(__name__)
 
 
-# ── Gemini ────────────────────────────────────────────────────────────────────
+# ── Gemini (google-genai SDK, clave desde variable de entorno) ────────────────
+
+def _get_safety_settings():
+    """Deshabilita todos los filtros de contenido de Gemini."""
+    from google.genai import types as genai_types
+    categories = [
+        "HARM_CATEGORY_HARASSMENT",
+        "HARM_CATEGORY_HATE_SPEECH",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "HARM_CATEGORY_DANGEROUS_CONTENT",
+    ]
+    return [
+        genai_types.SafetySetting(category=c, threshold="BLOCK_NONE")
+        for c in categories
+    ]
+
 
 def _call_gemini(prompt: str, config: dict,
                  max_tokens: int = 4096) -> Optional[str]:
-    import time, socket
-
-    api_key = config.get("gemini", {}).get("api_key", "").strip()
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
+        logger.warning("GEMINI_API_KEY no encontrada en el entorno")
         return None
 
-    model = config.get("gemini", {}).get("model", "gemini-2.0-flash")
-    url   = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={api_key}"
-    )
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
-    }).encode("utf-8")
+    model = config.get("gemini", {}).get("model", "gemini-3.1-flash-lite-preview")
 
-    max_retries = 4
-    for attempt in range(max_retries):
-        try:
-            req = urllib.request.Request(
-                url, data=payload,
-                headers={"Content-Type": "application/json"}, method="POST"
-            )
-            old_timeout = socket.getdefaulttimeout()
-            socket.setdefaulttimeout(45)
-            try:
-                with urllib.request.urlopen(req) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-            finally:
-                socket.setdefaulttimeout(old_timeout)
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                logger.warning(f"Gemini rate limit (429) — reintentando en 10s "
-                               f"(intento {attempt+1}/{max_retries})")
-                time.sleep(10)
-            else:
-                logger.warning(f"Gemini API error: HTTP {e.code}")
-                return None
-        except OSError:
-            logger.warning(f"Gemini timeout — reintentando en 10s "
-                           f"(intento {attempt+1}/{max_retries})")
-            time.sleep(10)
-        except Exception as e:
-            logger.warning(f"Gemini API error: {e}")
-            return None
+    try:
+        from google import genai
+        from google.genai import types as genai_types
 
-    logger.warning("Gemini: máximo de reintentos alcanzado")
-    return None
+        client   = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=max_tokens,
+                safety_settings=_get_safety_settings(),
+                response_mime_type="application/json",
+            ),
+        )
+        return response.text
+    except Exception as exc:
+        logger.warning(f"Gemini API error: {exc}")
+        return None
 
 
 # ── Prompt principal ──────────────────────────────────────────────────────────
@@ -307,12 +298,15 @@ def _extract_audio_array(video_path: Path, sample_rate: int = 16000) -> np.ndarr
         os.unlink(tmp_path)
 
 
+_DEFAULT_SCORE_WEIGHTS = {"audio_peak": 0.45, "speech_speed": 0.35, "keywords": 0.2}
+
+
 def _detect_by_signals(video_path: Path, words: List[Dict], config: dict,
                         video_duration: float,
                         valid_start: float, valid_end: float) -> List[Dict]:
     """Detección legacy por señales cuantitativas (fallback sin Gemini)."""
     cfg_v    = config["viral_detection"]
-    weights  = cfg_v["score_weights"]
+    weights  = cfg_v.get("score_weights", _DEFAULT_SCORE_WEIGHTS)
     min_dur  = cfg_v["min_clip_duration"]
     max_dur  = cfg_v["max_clip_duration"]
     pre_buf  = cfg_v["pre_buffer_seconds"]
@@ -401,7 +395,7 @@ def detect_viral_moments(
     skip_outro  = cfg_v.get("skip_outro_sec", 0)
     valid_start = float(skip_intro)
     valid_end   = video_duration - float(skip_outro)
-    has_gemini  = bool(config.get("gemini", {}).get("api_key", "").strip())
+    has_gemini  = bool(os.environ.get("GEMINI_API_KEY", "").strip())
 
     logger.info(f"Zona válida: {valid_start:.0f}s – {valid_end:.0f}s "
                 f"(excluyendo {skip_intro}s intro + {skip_outro}s outro)")

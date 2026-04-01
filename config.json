@@ -22,12 +22,6 @@
     "pre_buffer_seconds": 3,
     "post_buffer_seconds": 2,
     "top_n_clips": 999,
-    "score_weights": {
-      "audio_peak": 0.45,
-      "speech_speed": 0.35,
-      "keywords": 0.2,
-      "scene_change": 0.0
-    },
     "viral_keywords": [
       "increíble",
       "no puede ser",
@@ -144,7 +138,19 @@
     "game_name": "GTA V"
   },
   "gemini": {
-    "api_key": "AIzaSyCM-jttJGVT_NceOpqqBngVx7GDrk_RKtg",
     "model": "gemini-3.1-flash-lite-preview"
+  },
+  "ai_features": {
+    "multimodal_video": false
+  },
+  "dynamic_crop": {
+    "enabled": false,
+    "motion_alpha": 0.03,
+    "zoom_alpha": 0.01,
+    "motion_threshold": 25,
+    "concentration_max": 0.10,
+    "hud_exclude_ratio": 0.15,
+    "x_offset": 0,
+    "analysis_every": 3
   }
 }
