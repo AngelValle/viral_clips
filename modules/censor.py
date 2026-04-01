@@ -8,11 +8,12 @@ Soporta perfiles de strictness por red social.
 
 import re
 import logging
+import shutil
 import subprocess
 import tempfile
 import os
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Set, Any
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def _load_wordlist(wordlist_path: Path) -> List[str]:
     return []
 
 
-def build_profanity_set(config: dict) -> set:
+def build_profanity_set(config: Dict[str, Any]) -> Set[str]:
     """Construye el conjunto de palabras a censurar según perfil y config."""
     mode      = config["censorship"]["mode"]
     profile   = config["censorship"]["profiles"].get(mode, {})
@@ -61,9 +62,9 @@ def build_profanity_set(config: dict) -> set:
 
 
 def detect_profanity(
-    words: List[Dict],
-    profanity_set: set,
-) -> List[Dict]:
+    words: List[Dict[str, Any]],
+    profanity_set: Set[str],
+) -> List[Dict[str, Any]]:
     """
     Marca las palabras que deben censurarse.
     Devuelve lista con campo extra: {"censored": bool, "censored_text": str}
@@ -94,7 +95,7 @@ def _asterisk(word: str) -> str:
 
 
 def apply_audio_censorship(input_path: Path, output_path: Path,
-                            bad_words: List[Dict], config: dict) -> Path:
+                            bad_words: List[Dict[str, Any]], config: Dict[str, Any]) -> Path:
     """
     Aplica el pitido al audio del vídeo usando ffmpeg.
     Si no hay palabras a censurar, copia el fichero tal cual.
@@ -103,7 +104,6 @@ def apply_audio_censorship(input_path: Path, output_path: Path,
     targets  = [w for w in bad_words if w["censored"]]
 
     if not targets:
-        import shutil
         shutil.copy2(str(input_path), str(output_path))
         logger.info("Sin palabras a censurar, audio sin cambios.")
         return output_path

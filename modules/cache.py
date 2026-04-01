@@ -6,8 +6,9 @@ Sistema de caché para el pipeline de clips virales.
 import hashlib
 import json
 import logging
+import shutil
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,6 @@ class PipelineCache:
         "viral_detection.min_clip_duration",
         "viral_detection.max_clip_duration",
         "viral_detection.top_n_clips",
-        "viral_detection.score_weights",
         "viral_detection.pre_buffer_seconds",
         "viral_detection.post_buffer_seconds",
     ]
@@ -140,18 +140,22 @@ class PipelineCache:
         except Exception:
             return None
 
-    def save_face_data(self, clip_stem: str, face_data: List[Dict]) -> None:
+    def save_face_data(self, clip_stem: str, face_data: List[Dict], is_driving: bool = False) -> None:
         (self.cache_dir / f"face_{clip_stem}.json").write_text(
             json.dumps(face_data, ensure_ascii=False), encoding="utf-8"
         )
         self._meta[f"face_cfg_fp_{clip_stem}"] = _config_fingerprint(self.config, self.FACE_CFG_KEYS)
+        self._meta[f"is_driving_{clip_stem}"]  = is_driving
         self._save_meta()
+
+    def get_is_driving(self, clip_stem: str) -> bool:
+        """Recupera el flag de modo conducción guardado junto a la face data."""
+        return bool(self._meta.get(f"is_driving_{clip_stem}", False))
 
     def is_clip_done(self, final_path: Path) -> bool:
         return final_path.exists() and final_path.stat().st_size > 0
 
     def clear(self) -> None:
-        import shutil
         shutil.rmtree(self.cache_dir, ignore_errors=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._meta = {}

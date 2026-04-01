@@ -20,16 +20,28 @@ Para desactivar el nivel 2: face_detection.require_face: false
 """
 
 import logging
+from functools import lru_cache
 import numpy as np
 import cv2
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_HSV_LOWER        = [125, 50,  50]
 DEFAULT_HSV_UPPER        = [165, 255, 255]
 DEFAULT_BORDER_MIN_RATIO = 0.03
+
+_cascade: Optional[cv2.CascadeClassifier] = None
+
+
+@lru_cache(maxsize=32)
+def _get_hsv_cache(hsv_lower: Tuple[int, int, int], hsv_upper: Tuple[int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
+    """Cachea los límites de color HSV en arrays de NumPy para evitar instanciarlos repetidamente."""
+    return (
+        np.array(hsv_lower, dtype=np.uint8),
+        np.array(hsv_upper, dtype=np.uint8),
+    )
 
 
 # ── Nivel 1: borde morado ─────────────────────────────────────────────────────
@@ -50,19 +62,13 @@ def _has_purple_border(frame: np.ndarray,
     if region.size == 0:
         return False
 
-    inner_x1 = border_px
-    inner_y1 = border_px
-    inner_x2 = region.shape[1] - border_px
-    inner_y2 = region.shape[0] - border_px
-
     mask = np.ones(region.shape[:2], dtype=np.uint8) * 255
-    if inner_x2 > inner_x1 and inner_y2 > inner_y1:
-        mask[inner_y1:inner_y2, inner_x1:inner_x2] = 0
+    if region.shape[1] > 2 * border_px and region.shape[0] > 2 * border_px:
+        mask[border_px:-border_px, border_px:-border_px] = 0
 
-    hsv    = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-    lower  = np.array(hsv_lower, dtype=np.uint8)
-    upper  = np.array(hsv_upper, dtype=np.uint8)
-    purple = cv2.inRange(hsv, lower, upper)
+    hsv            = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    lower, upper   = _get_hsv_cache(tuple(hsv_lower), tuple(hsv_upper))
+    purple         = cv2.inRange(hsv, lower, upper)
     purple = cv2.bitwise_and(purple, mask)
 
     border_pixels = np.count_nonzero(mask)
@@ -73,8 +79,6 @@ def _has_purple_border(frame: np.ndarray,
 
 
 # ── Nivel 2: cara dentro del recuadro ────────────────────────────────────────
-
-_cascade: Optional[cv2.CascadeClassifier] = None
 
 def _get_cascade() -> cv2.CascadeClassifier:
     global _cascade
@@ -107,6 +111,7 @@ def _has_face_inside(frame: np.ndarray,
 
     gray     = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     min_size = max(20, int(cam_w * min_size_ratio))
+    min_size = min(min_size, min(gray.shape))
 
     cascade = _get_cascade()
     faces   = cascade.detectMultiScale(
@@ -187,7 +192,7 @@ def _is_driving_frame(frame: np.ndarray, config: dict) -> bool:
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
-def analyze_video_faces(clip_path: Path, config: dict) -> List[Dict[str, Any]]:
+def analyze_video_faces(clip_path: Path, config: dict) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Analiza cada frame del clip con detección en dos niveles:
       1. Borde morado → rápido, procesa 1 de cada 2 frames

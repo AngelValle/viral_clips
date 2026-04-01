@@ -21,15 +21,134 @@ Layout sin cámara:
 
 import json
 import logging
+import os
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from modules.gpu_utils    import get_ffmpeg_hwaccel
-from modules.neon_name    import generate_neon_overlay
+import cv2
+import numpy as np
+
+from modules.gpu_utils import get_ffmpeg_hwaccel
 
 logger = logging.getLogger(__name__)
+
+
+# ── Neon name animation (inlineado desde neon_name.py) ───────────────────────
+
+def _find_font(font_name: str) -> Optional[str]:
+    import sys, glob
+    name_lower = font_name.lower().replace(" ", "")
+    if sys.platform == "win32":
+        win_roots = [r"C:\Windows\Fonts", os.path.expanduser(r"~\AppData\Local\Microsoft\Windows\Fonts")]
+        for root in win_roots:
+            if not os.path.isdir(root):
+                continue
+            for fname in os.listdir(root):
+                if fname.lower().endswith((".ttf", ".otf")) and name_lower in fname.lower().replace(" ", "").replace("-", ""):
+                    return os.path.join(root, fname)
+        for fallback in ["arialbd.ttf", "calibrib.ttf", "verdanab.ttf"]:
+            path = os.path.join(r"C:\Windows\Fonts", fallback)
+            if os.path.exists(path):
+                return path
+        return None
+    for pattern in ["/usr/share/fonts/**/*.ttf", os.path.expanduser("~/.fonts/**/*.ttf")]:
+        for path in glob.glob(pattern, recursive=True):
+            if name_lower in os.path.basename(path).lower().replace(" ", "").replace("-", ""):
+                return path
+    return None
+
+
+def _build_static_layers(
+    text: str, width: int, height: int, font: Any, neon_rgb: Tuple[int, int, int]
+) -> Tuple[np.ndarray, np.ndarray]:
+    from PIL import Image, ImageDraw, ImageFilter
+    nr, ng, nb = neon_rgb
+    probe = ImageDraw.Draw(Image.new("RGBA", (width, height)))
+    bbox  = probe.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx, ty  = (width - tw) // 2, (height - th) // 2
+
+    fill_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for radius, alpha in [(14, 180), (7, 140), (3, 100)]:
+        layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text((tx, ty), text, font=font, fill=(nr, ng, nb, alpha))
+        fill_img = Image.alpha_composite(fill_img, layer.filter(ImageFilter.GaussianBlur(radius=radius)))
+
+    d = ImageDraw.Draw(fill_img)
+    for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
+        d.text((tx + dx, ty + dy), text, font=font, fill=(0, 0, 0, 60))
+    d.text((tx, ty), text, font=font, fill=(nr, ng, nb, 255))
+
+    stroke_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(stroke_img).text((tx, ty), text, font=font, fill=(0, 0, 0, 0), stroke_width=2, stroke_fill=(255, 255, 255, 255))
+
+    return np.array(fill_img, dtype=np.uint8), np.array(stroke_img, dtype=np.float32)[:, :, 3] / 255.0
+
+
+def _render_frame(fill_arr: np.ndarray, stroke_mask: np.ndarray, width: int, height: int, t: float) -> Any:
+    from PIL import Image, ImageFilter
+    sweep_x = t * (width + width * 0.2) - width * 0.1
+    sweep_w, trail_w = width * 0.15, width * 0.30
+
+    xs  = np.arange(width, dtype=np.float32)
+    haz = np.exp(-((xs - sweep_x) ** 2) / (2 * (sweep_w * 0.4) ** 2))
+    estela = np.where(xs < sweep_x, np.clip((1.0 - (sweep_x - xs) / trail_w), 0, 1) ** 2, 0.0)
+    intensity_2d = np.tile(np.clip(0.15 + estela * 0.5 + haz * 1.0, 0, 1), (height, 1))
+
+    stroke_frame = np.zeros((height, width, 4), dtype=np.uint8)
+    stroke_frame[:, :, :3] = 255
+    stroke_frame[:, :, 3] = (stroke_mask * intensity_2d * 255).clip(0, 255).astype(np.uint8)
+
+    halo_arr = np.zeros((height, width, 4), dtype=np.uint8)
+    halo_arr[:, :, :3] = 255
+    halo_arr[:, :, 3] = (stroke_mask * np.tile(haz, (height, 1)) * 200).clip(0, 255).astype(np.uint8)
+    halo = Image.fromarray(halo_arr, "RGBA").filter(ImageFilter.GaussianBlur(radius=6))
+
+    result = Image.fromarray(fill_arr, "RGBA")
+    result = Image.alpha_composite(result, halo)
+    return Image.alpha_composite(result, Image.fromarray(stroke_frame, "RGBA"))
+
+
+def generate_neon_overlay(
+    text: str, width: int, height: int, fps: int, output_path: Path, config: dict
+) -> Path:
+    from PIL import ImageFont
+    layout      = config.get("layout", {})
+    sweep_speed = layout.get("neon_sweep_speed", 0.6)
+    font_name   = config.get("subtitles", {}).get("font_name", "Showcard Gothic")
+    font_size   = max(12, int(height * layout.get("neon_font_size_ratio", 0.65)))
+    bgr         = layout.get("webcam_name_color_bgr", [255, 50, 255])
+
+    font_path    = _find_font(font_name)
+    font         = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
+    cycle_frames = max(10, int(round(fps / sweep_speed)))
+    fill_arr, stroke_mask = _build_static_layers(
+        text, width, height, font, (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+
+        def render_and_save(i: int) -> None:
+            _render_frame(fill_arr, stroke_mask, width, height, i / cycle_frames).save(
+                str(tdp / f"f{i:04d}.png")
+            )
+
+        with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, 8)) as executor:
+            list(executor.map(render_and_save, range(cycle_frames)))
+
+        r = subprocess.run([
+            "ffmpeg", "-y", "-framerate", str(fps), "-i", str(tdp / "f%04d.png"),
+            "-vcodec", "png", "-pix_fmt", "rgba", str(output_path),
+        ], capture_output=True, timeout=60)
+
+        if r.returncode != 0:
+            raise RuntimeError("Fallo crítico armando la animación de Neón.")
+
+    return output_path
 
 
 # ── Caché de MOV neón ─────────────────────────────────────────────────────────
