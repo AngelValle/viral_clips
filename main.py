@@ -95,7 +95,7 @@ class PipelineFormatter(logging.Formatter):
         m = self._RE_PASO.match(msg)
         if m:
             n, total, title = m.group(1), m.group(2), m.group(3)
-            badge = f"{C.BOLD}{C.BG_DARK}{C.CYAN} {n}/{total} {C.RESET}"
+            badge = f"{C.BOLD}{C.BG_DARK}{C.CYAN} PASO {n}/{total} {C.RESET}"
             return f"\n{C.DIM}{C.GREY}{ts}{C.RESET}  {badge}  {C.BOLD}{C.WHITE}{title}{C.RESET}"
 
         m = self._RE_CACHED.match(msg)

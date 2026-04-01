@@ -72,8 +72,8 @@ def _call_gemini(
     config: dict,
     max_tokens: int = 4096,
     frames: Optional[List[tuple]] = None,
-    max_retries: int = 5,
-    retry_wait: float = 10.0,
+    max_retries: int = 50,
+    retry_wait: float = 20.0,
 ) -> Optional[str]:
     """
     Llama a Gemini con reintentos para el tier gratuito (rate limit 15 RPM).
