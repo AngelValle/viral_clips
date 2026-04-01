@@ -88,7 +88,7 @@ def cmd_gpu(_args) -> None:
     print(f"\n{SEP}\n4. TEST REAL h264_nvenc\n{SEP}")
     r = subprocess.run([
         "ffmpeg", "-y", "-v", "error", "-f", "lavfi",
-        "-i", "color=black:size=128x128:rate=25",
+        "-i", "color=black:size=256x256:rate=25",
         "-t", "0.2", "-an", "-pix_fmt", "yuv420p",
         "-c:v", "h264_nvenc", "-f", "null", "-"
     ], capture_output=True, text=True, timeout=30)

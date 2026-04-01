@@ -105,6 +105,19 @@ def _run_with_log(cmd: list, log_placeholder):
             log_placeholder.markdown(_render_log_md(st.session_state["global_log"]), unsafe_allow_html=True)
     return proc.returncode
 
+# ── Log único — debe estar definido antes de cualquier tab que lo use ─────────
+st.divider()
+_log_col, _btn_col = st.columns([6, 1])
+with _log_col:
+    st.markdown("#### Pipeline Log")
+with _btn_col:
+    if st.button("Limpiar", key="clear_log"):
+        st.session_state["global_log"] = []
+        st.rerun()
+LOG_PLACEHOLDER = st.empty()
+LOG_PLACEHOLDER.markdown(_render_log_md(st.session_state["global_log"]), unsafe_allow_html=True)
+st.divider()
+
 # ==========================================
 # PESTAÑA 3: GESTIÓN DE CACHÉ
 # ==========================================
@@ -296,19 +309,6 @@ with tab_tools:
         else:
             st.error(f"❌ Error (código {rc})")
 
-
-# ── Log único — definido aquí para estar disponible en ambas pestañas ──────────
-st.divider()
-_log_col, _btn_col = st.columns([6, 1])
-with _log_col:
-    st.markdown("#### Pipeline Log")
-with _btn_col:
-    if st.button("Limpiar", key="clear_log"):
-        st.session_state["global_log"] = []
-        st.rerun()
-LOG_PLACEHOLDER = st.empty()
-LOG_PLACEHOLDER.markdown(_render_log_md(st.session_state["global_log"]), unsafe_allow_html=True)
-st.divider()
 
 # ==========================================
 # PESTAÑA 1: LANZADOR MULTI-VÍDEO
