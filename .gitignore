@@ -6,3 +6,5 @@ venv/
 *.mkv
 *.avi
 *.mov
+client_secrets.json
+token_analytics.pickle

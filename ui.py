@@ -27,12 +27,13 @@ if not videos:
     st.warning(f"No hay vídeos en la carpeta de entrada: {input_dir}")
     st.stop()
 
-tab_lanzador, tab_revisor, tab_cache, tab_tools, tab_config = st.tabs([
+tab_lanzador, tab_revisor, tab_cache, tab_tools, tab_config, tab_analytics = st.tabs([
     "🚀 1. Lanzador de Tareas",
     "✂️ 2. Revisión y Publicación",
     "🗑️ 3. Caché",
     "🔧 4. Herramientas",
     "⚙️ 5. Configuración",
+    "📊 6. Analítica",
 ])
 
 # ── Estado global ─────────────────────────────────────────────────────────────
@@ -994,4 +995,568 @@ with tab_config:
 
         _save_cfg(cfg_new)
         st.success("✅ Configuración guardada en `config.json`")
-        st.rerun()
+
+# ==========================================
+# PESTAÑA 6: ANALÍTICA
+# ==========================================
+with tab_analytics:
+    import altair as alt
+    import pandas as pd
+    import modules.analytics as _am
+    from modules.analytics import (
+        is_connected, connect_youtube, disconnect_youtube,
+        get_channel_overview, get_analytics_with_delta,
+        get_top_videos, get_day_of_week_stats,
+    )
+
+    _PERIODOS = ["1 día", "7 días", "14 días", "28 días", "1 mes", "Histórico"]
+    _TIPOS    = ["Todos", "Shorts", "Vídeos"]
+
+    # Paleta
+    _CV = "#4C9BE8"; _CE = "#F59E0B"; _CS = "#2DD4BF"
+    _CL = "#818CF8"; _CC = "#34D399"; _CSH = "#F472B6"; _CLO = "#F87171"
+
+    def _delta_str(current, prev):
+        if prev is None or prev == 0:
+            return None
+        pct = (current - prev) / abs(prev) * 100
+        return f"{pct:+.1f}%"
+
+    def _fmt_dur(seg):
+        s = int(seg or 0)
+        return f"{s // 60}m {s % 60:02d}s"
+
+    # ── YouTube ────────────────────────────────────────────────────────────────
+    st.subheader("📺 YouTube Analytics")
+
+    if not Path("client_secrets.json").exists():
+        st.warning(
+            "Falta `client_secrets.json`. Descárgalo desde Google Cloud Console "
+            "→ APIs & Services → Credentials → OAuth 2.0 Client ID → tipo **Desktop app**."
+        )
+        st.stop()
+
+    yt_connected = is_connected()
+
+    if not yt_connected:
+        st.info(
+            "**Requisito previo (una sola vez):**  \n"
+            "1. Credencial OAuth tipo **Desktop app** → `client_secrets.json`  \n"
+            "2. *OAuth consent screen → Público → Usuarios de prueba* → añade tu email  \n"
+            "3. Activa: **YouTube Data API v3** y **YouTube Analytics API**"
+        )
+        if st.button("🔗 Conectar YouTube", key="btn_connect_yt"):
+            with st.spinner("Abriendo navegador para autenticación..."):
+                ok = connect_youtube()
+            if ok:
+                st.success("✅ Conectado.")
+                st.rerun()
+            else:
+                st.error("❌ No se pudo conectar. Revisa client_secrets.json.")
+    else:
+        # ── Header canal + filtros ─────────────────────────────────────────
+        with st.spinner(""):
+            overview = get_channel_overview()
+
+        col_info, col_disc = st.columns([6, 1])
+        with col_info:
+            if overview:
+                st.markdown(
+                    f"**{overview['channelTitle']}** &nbsp;·&nbsp; "
+                    f"**{overview['subscriberCount']:,}** suscriptores &nbsp;·&nbsp; "
+                    f"**{overview['viewCount']:,}** vistas totales &nbsp;·&nbsp; "
+                    f"**{overview['videoCount']:,}** vídeos"
+                )
+        with col_disc:
+            if st.button("⛔ Desconectar", key="btn_disc_yt"):
+                disconnect_youtube()
+                st.rerun()
+
+        col_tipo, col_periodo, _ = st.columns([2, 2, 4])
+        with col_tipo:
+            yt_tipo = st.selectbox("Tipo", _TIPOS, key="yt_tipo")
+        with col_periodo:
+            yt_periodo = st.selectbox("Periodo", _PERIODOS, index=2, key="yt_periodo")
+
+        # Date pickers personalizados para Histórico
+        if yt_periodo == "Histórico":
+            today = datetime.date.today()
+            default_start = datetime.date(2020, 1, 1)
+            default_end   = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+            col_ds, col_de = st.columns(2)
+            with col_ds:
+                hist_start = st.date_input(
+                    "Desde (primer día del mes)",
+                    value=default_start,
+                    min_value=datetime.date(2005, 1, 1),
+                    max_value=default_end,
+                    key="hist_start",
+                )
+            with col_de:
+                hist_end = st.date_input(
+                    "Hasta (primer día del mes)",
+                    value=default_end,
+                    min_value=datetime.date(2005, 1, 1),
+                    max_value=default_end,
+                    key="hist_end",
+                )
+            # Selector de granularidad
+            yt_granularity = st.radio(
+                "Granularidad",
+                ["Diario", "Mensual"],
+                index=1,
+                horizontal=True,
+                key="hist_granularity",
+            )
+            yt_granularity = "day" if yt_granularity == "Diario" else "month"
+
+            # Para mensual las fechas deben ser primer día de mes (requisito API)
+            if yt_granularity == "month":
+                hist_start = hist_start.replace(day=1)
+                hist_end   = hist_end.replace(day=1)
+            yt_periodo = f"custom:{hist_start}:{hist_end}"
+        else:
+            yt_granularity = "auto"
+
+        st.divider()
+
+        # ── Carga de datos ─────────────────────────────────────────────────
+        with st.spinner("Cargando analytics..."):
+            df, prev = get_analytics_with_delta(yt_periodo, yt_tipo, yt_granularity)
+            df_top   = get_top_videos(yt_periodo, yt_tipo, limit=200)
+            df_dow   = get_day_of_week_stats(yt_tipo)
+
+        if yt_tipo != "Todos":
+            st.caption(
+                f"⚠ El filtro **{yt_tipo}** se aplica solo a la tabla de top vídeos. "
+                "La YouTube Analytics API no permite filtrar series temporales por tipo de contenido."
+            )
+
+        if df is None:
+            st.error("No se pudieron cargar los datos de analytics.")
+            if _am.last_error:
+                st.code(_am.last_error, language="text")
+            st.stop()
+
+        if df.empty:
+            st.info("No hay datos en el periodo seleccionado.")
+            st.stop()
+
+        # ── KPIs con delta ─────────────────────────────────────────────────
+        total_v   = int(df["vistas"].sum())
+        total_min = int(df["minutos_visionados"].sum())
+        total_sn  = int(df.get("suscriptores_ganados", pd.Series([0])).sum()
+                        - df.get("suscriptores_perdidos", pd.Series([0])).sum())
+        total_sh  = int(df.get("shares", pd.Series([0])).sum())
+        avg_er    = float(df["engagement_rate"].mean()) if "engagement_rate" in df.columns else 0.0
+        avg_dur   = float(df["duracion_media_seg"].mean()) if "duracion_media_seg" in df.columns else 0.0
+
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("👁 Vistas",            f"{total_v:,}",
+                  delta=_delta_str(total_v,   prev.get("vistas")   if prev else None))
+        k2.metric("⏱ Horas visionadas",   f"{total_min // 60:,}h {total_min % 60}m",
+                  delta=_delta_str(total_min, prev.get("minutos_visionados") if prev else None))
+        k3.metric("💬 Eng. Rate",         f"{avg_er:.2f}%",
+                  delta=_delta_str(avg_er,    prev.get("engagement_rate")    if prev else None))
+        k4.metric("👥 Subs netos",        f"{total_sn:+,}",
+                  delta=_delta_str(total_sn,
+                      (prev.get("suscriptores_ganados", 0) - prev.get("suscriptores_perdidos", 0))
+                      if prev else None))
+        k5.metric("🔗 Shares",            f"{total_sh:,}",
+                  delta=_delta_str(total_sh,  prev.get("shares")   if prev else None))
+        k6.metric("▶ Dur. media",         _fmt_dur(avg_dur))
+
+        if prev is None:
+            st.caption("_(Sin comparativa disponible para 'Histórico')_")
+
+        st.divider()
+
+        # ── Gráficos de tendencia (4 tabs) ─────────────────────────────────
+        t_vis, t_eng, t_subs, t_time = st.tabs(
+            ["📈 Vistas", "💬 Engagement", "👥 Suscriptores", "⏱ Tiempo visionado"]
+        )
+
+        _x_type = "O" if yt_periodo != "Histórico" else "O"
+        _x_title = "Fecha"
+
+        with t_vis:
+            ch = (
+                alt.Chart(df).mark_area(opacity=0.25, color=_CV).encode(
+                    x=alt.X("fecha:O", title=_x_title),
+                    y=alt.Y("vistas:Q", title="Vistas"),
+                ) + alt.Chart(df).mark_line(color=_CV, strokeWidth=2).encode(
+                    x="fecha:O",
+                    y="vistas:Q",
+                    tooltip=["fecha", "vistas", "likes", "comentarios", "shares"],
+                )
+            ).properties(height=280)
+            st.altair_chart(ch, use_container_width=True)
+
+        with t_eng:
+            df_eng = df[["fecha", "likes", "comentarios", "shares"]].melt(
+                id_vars="fecha", var_name="tipo", value_name="valor"
+            )
+            _color_map = alt.Scale(
+                domain=["likes", "comentarios", "shares"],
+                range=[_CL, _CC, _CSH],
+            )
+            ch = (
+                alt.Chart(df_eng)
+                .mark_area(opacity=0.7)
+                .encode(
+                    x=alt.X("fecha:O", title=_x_title),
+                    y=alt.Y("valor:Q", stack=True, title="Interacciones"),
+                    color=alt.Color("tipo:N", scale=_color_map, title="Tipo"),
+                    tooltip=["fecha", "tipo", "valor"],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(ch, use_container_width=True)
+            st.caption(
+                f"Engagement rate medio: **{avg_er:.2f}%** "
+                f"({'sin comparativa' if prev is None else 'vs ' + str(round(prev.get('engagement_rate', 0), 2)) + '% periodo anterior'})"
+            )
+
+        with t_subs:
+            df_subs = df[["fecha", "suscriptores_ganados", "suscriptores_perdidos"]].melt(
+                id_vars="fecha", var_name="tipo", value_name="valor"
+            )
+            _subs_color = alt.Scale(
+                domain=["suscriptores_ganados", "suscriptores_perdidos"],
+                range=[_CS, _CLO],
+            )
+            ch = (
+                alt.Chart(df_subs)
+                .mark_bar(opacity=0.85)
+                .encode(
+                    x=alt.X("fecha:O", title=_x_title),
+                    y=alt.Y("valor:Q", title="Suscriptores"),
+                    color=alt.Color("tipo:N", scale=_subs_color, title=""),
+                    tooltip=["fecha", "tipo", "valor"],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(ch, use_container_width=True)
+
+        with t_time:
+            df_t = df.copy()
+            df_t["horas"] = df_t["minutos_visionados"] / 60
+            ch = (
+                alt.Chart(df_t).mark_area(opacity=0.25, color=_CE).encode(
+                    x=alt.X("fecha:O", title=_x_title),
+                    y=alt.Y("horas:Q", title="Horas visionadas"),
+                ) + alt.Chart(df_t).mark_line(color=_CE, strokeWidth=2).encode(
+                    x="fecha:O",
+                    y="horas:Q",
+                    tooltip=["fecha", "horas", "vistas"],
+                )
+            ).properties(height=280)
+            st.altair_chart(ch, use_container_width=True)
+
+        st.divider()
+
+        # ── Mejor día para publicar ─────────────────────────────────────────
+        st.markdown("### 📅 Mejor día para publicar _(últimos 90 días)_")
+        if df_dow is not None and not df_dow.empty:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                ch_views = (
+                    alt.Chart(df_dow)
+                    .mark_bar(color=_CV, opacity=0.85)
+                    .encode(
+                        x=alt.X("vistas_media:Q", title="Media de vistas"),
+                        y=alt.Y("dia_semana:N", sort=None, title=""),
+                        tooltip=["dia_semana", "vistas_media", "n_dias"],
+                    )
+                    .properties(title="Media de vistas por día", height=220)
+                )
+                st.altair_chart(ch_views, use_container_width=True)
+            with col_b:
+                ch_er = (
+                    alt.Chart(df_dow)
+                    .mark_bar(color=_CE, opacity=0.85)
+                    .encode(
+                        x=alt.X("engagement_media:Q", title="Engagement Rate (%)"),
+                        y=alt.Y("dia_semana:N", sort=None, title=""),
+                        tooltip=["dia_semana", "engagement_media", "n_dias"],
+                    )
+                    .properties(title="Engagement Rate medio por día", height=220)
+                )
+                st.altair_chart(ch_er, use_container_width=True)
+
+            # Recomendación automática
+            best_views = df_dow.loc[df_dow["vistas_media"].idxmax(), "dia_semana"]
+            best_er    = df_dow.loc[df_dow["engagement_media"].idxmax(), "dia_semana"]
+            st.info(
+                f"**Mejor día por vistas:** {best_views} &nbsp;|&nbsp; "
+                f"**Mejor día por engagement:** {best_er}"
+            )
+        else:
+            st.caption("Sin datos suficientes para el análisis por día de la semana.")
+
+        st.divider()
+
+        # ── Top vídeos ─────────────────────────────────────────────────────
+        _n_top = len(df_top) if df_top is not None else 0
+        st.markdown(f"### 🏆 Vídeos del periodo ({_n_top})")
+        if df_top is not None and not df_top.empty:
+            st.dataframe(
+                df_top.style
+                .format({
+                    "vistas":       "{:,}",
+                    "er_pct":       "{:.2f}%",
+                    "likes":        "{:,}",
+                    "comentarios":  "{:,}",
+                    "shares":       "{:,}",
+                    "subs_ganados": "{:,}",
+                })
+                .bar(subset=["vistas"], color=f"{_CV}33")
+                .bar(subset=["er_pct"], color=f"{_CE}33"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "título":       st.column_config.TextColumn("Título", width="large"),
+                    "vistas":       st.column_config.NumberColumn("Vistas"),
+                    "er_pct":       st.column_config.NumberColumn("Tasa interacción %"),
+                    "duracion_media":st.column_config.TextColumn("Duración media"),
+                    "likes":        st.column_config.NumberColumn("Likes"),
+                    "comentarios":  st.column_config.NumberColumn("Comentarios"),
+                    "shares":       st.column_config.NumberColumn("Shares"),
+                    "subs_ganados": st.column_config.NumberColumn("Subs ganados"),
+                },
+            )
+        else:
+            st.caption("Sin datos de vídeos para este periodo.")
+
+        st.divider()
+
+        # ── Carga de datos secundarios ─────────────────────────────────────
+        from modules.analytics import (
+            get_traffic_sources, get_subscribed_status,
+            get_device_types, get_top_countries, get_demographics,
+        )
+        with st.spinner("Cargando análisis de audiencia..."):
+            df_traffic  = get_traffic_sources(yt_periodo)
+            df_subs_st  = get_subscribed_status(yt_periodo)
+            df_devices  = get_device_types(yt_periodo)
+            df_countries= get_top_countries(yt_periodo, limit=15)
+            df_demo     = get_demographics(yt_periodo)
+
+        # ── 1. Fuentes de tráfico ──────────────────────────────────────────
+        st.markdown("### 🔎 Fuentes de tráfico")
+        if df_traffic is not None and not df_traffic.empty:
+            # Destacar fuente principal
+            top_src = df_traffic.iloc[0]
+            st.caption(
+                f"Fuente principal: **{top_src['fuente']}** — "
+                f"{top_src['vistas']:,} vistas ({top_src['porcentaje']}%)"
+            )
+            # Insight viral: Vídeos sugeridos
+            sug = df_traffic[df_traffic["fuente"] == "Vídeos sugeridos"]
+            if not sug.empty:
+                pct_sug = sug.iloc[0]["porcentaje"]
+                if pct_sug >= 40:
+                    st.success(f"✅ El {pct_sug}% de tus vistas vienen de 'Vídeos sugeridos' — el algoritmo está distribuyendo tu contenido activamente.")
+                elif pct_sug >= 20:
+                    st.info(f"ℹ {pct_sug}% de vistas desde 'Vídeos sugeridos'. Aumentar el CTR y retención puede mejorar la distribución orgánica.")
+
+            ch_traffic = (
+                alt.Chart(df_traffic)
+                .mark_bar(color=_CV, opacity=0.85)
+                .encode(
+                    x=alt.X("vistas:Q", title="Vistas"),
+                    y=alt.Y("fuente:N", sort="-x", title=""),
+                    tooltip=["fuente", "vistas", "porcentaje"],
+                )
+                .properties(height=max(200, len(df_traffic) * 32))
+            )
+            pct_text = (
+                alt.Chart(df_traffic)
+                .mark_text(align="left", dx=4, color="#8B8FA8")
+                .encode(
+                    x="vistas:Q",
+                    y=alt.Y("fuente:N", sort="-x"),
+                    text=alt.Text("porcentaje:Q", format=".1f", formatType="number"),
+                )
+            )
+            st.altair_chart((ch_traffic + pct_text), use_container_width=True)
+        else:
+            st.caption("Sin datos de fuentes de tráfico.")
+
+        st.divider()
+
+        # ── 2. Suscriptores vs no suscriptores ─────────────────────────────
+        st.markdown("### 🔔 Suscriptores vs no suscriptores")
+        if df_subs_st is not None and not df_subs_st.empty:
+            col_s1, col_s2 = st.columns([1, 2])
+            with col_s1:
+                for _, row in df_subs_st.iterrows():
+                    st.metric(
+                        row["estado"],
+                        f"{row['vistas']:,} vistas",
+                        delta=f"{row['porcentaje']}% del total",
+                        delta_color="off",
+                    )
+                unsub = df_subs_st[df_subs_st["estado"] == "No suscriptores"]
+                if not unsub.empty:
+                    pct_ns = unsub.iloc[0]["porcentaje"]
+                    if pct_ns >= 60:
+                        st.success(f"✅ {pct_ns}% de vistas no suscriptores → alto alcance viral.")
+                    elif pct_ns >= 40:
+                        st.info(f"ℹ {pct_ns}% no suscriptores. Buen alcance externo.")
+                    else:
+                        st.warning(f"⚠ Solo {pct_ns}% no suscriptores. El contenido llega principalmente a tu audiencia actual.")
+            with col_s2:
+                ch_subs = (
+                    alt.Chart(df_subs_st)
+                    .mark_arc(innerRadius=55)
+                    .encode(
+                        theta=alt.Theta("vistas:Q"),
+                        color=alt.Color("estado:N",
+                            scale=alt.Scale(
+                                domain=["Suscriptores", "No suscriptores"],
+                                range=[_CS, _CV],
+                            ),
+                            legend=alt.Legend(title=""),
+                        ),
+                        tooltip=["estado", "vistas", "porcentaje"],
+                    )
+                    .properties(height=220)
+                )
+                st.altair_chart(ch_subs, use_container_width=True)
+
+            # Tabla comparativa de métricas
+            df_subs_display = df_subs_st.copy()
+            df_subs_display["horas_visionadas"] = (
+                df_subs_display["minutos_visionados"] // 60
+            ).astype(str) + "h " + (
+                df_subs_display["minutos_visionados"] % 60
+            ).astype(str) + "m"
+            df_subs_display["duración_media"] = df_subs_display["duracion_media_seg"].apply(
+                lambda s: f"{int(s)//60}m {int(s)%60:02d}s"
+            )
+            st.dataframe(
+                df_subs_display[["estado", "vistas", "porcentaje", "horas_visionadas", "duración_media"]]
+                .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
+                hide_index=True, use_container_width=True,
+            )
+        else:
+            st.caption("Sin datos de estado de suscripción.")
+
+        st.divider()
+
+        # ── 3. Tipos de dispositivo ────────────────────────────────────────
+        st.markdown("### 📱 Dispositivos")
+        if df_devices is not None and not df_devices.empty:
+            col_d1, col_d2 = st.columns([1, 1])
+            with col_d1:
+                ch_dev = (
+                    alt.Chart(df_devices)
+                    .mark_arc(innerRadius=50)
+                    .encode(
+                        theta=alt.Theta("vistas:Q"),
+                        color=alt.Color("dispositivo:N",
+                            scale=alt.Scale(scheme="tableau10"),
+                            legend=alt.Legend(title=""),
+                        ),
+                        tooltip=["dispositivo", "vistas", "porcentaje"],
+                    )
+                    .properties(height=240)
+                )
+                st.altair_chart(ch_dev, use_container_width=True)
+            with col_d2:
+                st.dataframe(
+                    df_devices.style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
+                    hide_index=True, use_container_width=True,
+                )
+                mobile = df_devices[df_devices["dispositivo"] == "Móvil"]
+                if not mobile.empty and mobile.iloc[0]["porcentaje"] >= 70:
+                    st.success(f"✅ {mobile.iloc[0]['porcentaje']}% de vistas en móvil — el formato vertical 9:16 es la decisión correcta.")
+        else:
+            st.caption("Sin datos de dispositivos.")
+
+        st.divider()
+
+        # ── 4. Distribución geográfica ─────────────────────────────────────
+        st.markdown("### 🌍 Distribución geográfica")
+        if df_countries is not None and not df_countries.empty:
+            col_g1, col_g2 = st.columns([2, 1])
+            with col_g1:
+                ch_geo = (
+                    alt.Chart(df_countries.head(10))
+                    .mark_bar(color=_CS, opacity=0.85)
+                    .encode(
+                        x=alt.X("vistas:Q", title="Vistas"),
+                        y=alt.Y("país:N", sort="-x", title=""),
+                        tooltip=["país", "vistas", "porcentaje"],
+                    )
+                    .properties(height=300)
+                )
+                pct_geo = (
+                    alt.Chart(df_countries.head(10))
+                    .mark_text(align="left", dx=4, color="#8B8FA8")
+                    .encode(
+                        x="vistas:Q",
+                        y=alt.Y("país:N", sort="-x"),
+                        text=alt.Text("porcentaje:Q", format=".1f"),
+                    )
+                )
+                st.altair_chart(ch_geo + pct_geo, use_container_width=True)
+            with col_g2:
+                st.dataframe(
+                    df_countries[["país", "vistas", "porcentaje"]]
+                    .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
+                    hide_index=True, use_container_width=True,
+                )
+        else:
+            st.caption("Sin datos geográficos.")
+
+        st.divider()
+
+        # ── 5. Demografía de audiencia ─────────────────────────────────────
+        st.markdown("### 👥 Demografía de audiencia")
+        st.caption("_(Sin filtro por tipo de contenido — limitación de la API de YouTube)_")
+        if df_demo is not None and not df_demo.empty:
+            _gender_colors = alt.Scale(
+                domain=["Hombre", "Mujer", "No especificado"],
+                range=[_CV, _CSH, "#94A3B8"],
+            )
+            ch_demo = (
+                alt.Chart(df_demo)
+                .mark_bar(opacity=0.85)
+                .encode(
+                    x=alt.X("edad:N",
+                        sort=["13 – 17", "18 – 24", "25 – 34",
+                              "35 – 44", "45 – 54", "55 – 64", "65+"],
+                        title="Grupo de edad",
+                    ),
+                    y=alt.Y("porcentaje:Q", title="% de audiencia"),
+                    color=alt.Color("genero:N", scale=_gender_colors, title="Género"),
+                    xOffset="genero:N",
+                    tooltip=["edad", "genero", "porcentaje"],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(ch_demo, use_container_width=True)
+
+            # Resumen
+            top_seg = df_demo.loc[df_demo["porcentaje"].idxmax()]
+            st.caption(
+                f"Segmento dominante: **{top_seg['edad']} años, {top_seg['genero']}** "
+                f"({top_seg['porcentaje']:.1f}%)"
+            )
+        else:
+            st.caption("Sin datos demográficos disponibles.")
+
+        st.divider()
+
+    # ── TikTok ─────────────────────────────────────────────────────────────────
+    st.subheader("🎵 TikTok Analytics")
+    st.info(
+        "La TikTok for Business API requiere aprobación manual "
+        "(solicitud en developers.tiktok.com). "
+        "Una vez aprobada, añade el Access Token en **⚙️ Configuración** → TikTok."
+    )
+    tiktok_token = config.get("tiktok", {}).get("access_token", "").strip()
+    if tiktok_token:
+        st.success("Token detectado — integración en desarrollo.")

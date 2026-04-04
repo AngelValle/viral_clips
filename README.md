@@ -797,6 +797,40 @@ Permite editar todos los parámetros del pipeline sin tocar `config.json` direct
 | **GPU / Hardware** | Forzar CPU, deshabilitar CUDA |
 | **Salida** | Formato de salida (`Vertical 9:16` / `Horizontal 16:9`), FPS, patrón de nombre de archivo |
 
+### Pestaña 6 — Analítica
+
+Dashboard profesional de analítica de canal conectado mediante OAuth2 a la **YouTube Analytics API v2** y la **YouTube Data API v3**. Requiere `client_secrets.json` de tipo **Desktop app** (Google Cloud Console).
+
+#### Configuración inicial (una sola vez)
+1. Crear credencial OAuth 2.0 tipo **Desktop app** en Google Cloud Console → descargar como `client_secrets.json`
+2. En *OAuth consent screen → Público → Usuarios de prueba*: añadir el email del canal
+3. Activar las APIs: **YouTube Data API v3** y **YouTube Analytics API**
+4. Pulsar **🔗 Conectar YouTube** en la pestaña → completar el flujo OAuth en el navegador
+5. El token se guarda en `token_analytics.pickle` (separado de `token.pickle` de publicación)
+
+#### Filtros
+- **Tipo de contenido**: Todos / Shorts / Vídeos _(aplica solo a Top vídeos; la API no soporta este filtro en series temporales)_
+- **Periodo**: 1 día · 7 días · 14 días · 28 días · 1 mes · Histórico
+
+#### Secciones del dashboard
+
+| Sección | Descripción |
+|---|---|
+| **Header de canal** | Nombre, suscriptores totales, vistas totales, nº de vídeos |
+| **KPIs (6 métricas)** | Vistas · Horas visionadas · Engagement Rate % · Suscriptores netos · Shares · Duración media — con delta % vs periodo anterior |
+| **Tendencia temporal** | 4 tabs: Vistas (área+línea) · Engagement (área apilada likes/comentarios/shares) · Suscriptores (ganados vs perdidos) · Tiempo visionado |
+| **Mejor día para publicar** | Últimos 90 días agrupados por día de la semana: media de vistas y engagement rate. Recomendación automática |
+| **Top vídeos del periodo** | Hasta 200 vídeos con: Título · Vistas · ER% · Duración media · Likes · Comentarios · Shares · Subs ganados. Barras de progreso visuales |
+| **Fuentes de tráfico** | Barras horizontales con % por fuente (Sugeridos, Búsqueda, Externo, etc.). Alerta si Vídeos sugeridos > 40% |
+| **Suscriptores vs no suscriptores** | Donut chart + tabla comparativa. Indicador automático de alcance viral |
+| **Dispositivos** | Donut chart: Móvil / PC / Tablet / TV / Consola. Alerta si móvil > 70% confirma formato 9:16 |
+| **Distribución geográfica** | Top 15 países por vistas con porcentaje |
+| **Demografía de audiencia** | Barras agrupadas por edad y género con segmento dominante destacado |
+| **TikTok Analytics** | Placeholder — pendiente de aprobación de la TikTok for Business API |
+
+#### Métricas no disponibles en la API pública
+Las siguientes métricas **solo** están disponibles en YouTube Studio interno y no se exponen en la API Analytics v2: impresiones, CTR de miniaturas, curva de retención por segundo, ingresos/RPM.
+
 ---
 
 ## Herramientas de calibración
