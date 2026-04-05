@@ -274,7 +274,7 @@ Los clips finales aparecerán en `videos/output/clips/`.
 **YouTube Shorts:**
 1. Crea un proyecto en [Google Cloud Console](https://console.cloud.google.com)
 2. Habilita **YouTube Data API v3**
-3. Crea credenciales OAuth2 (tipo Desktop) → descarga `client_secrets.json` en la raíz del proyecto
+3. Crea credenciales OAuth2 (tipo Desktop) → descarga `client_secrets.json` o `client_secrets_NombreCuenta.json` en la raíz del proyecto
 4. La primera vez que el Paso 8 intente publicar en YouTube, abrirá el navegador para autorización
 
 **TikTok:**
@@ -296,7 +296,7 @@ Los clips finales aparecerán en `videos/output/clips/`.
 | 6 | Ajustar nombre streamer, idioma, intro/outro | `config.json` |
 | 7 | Test con `--max-step 2` + revisión en UI | `main.py` + `ui.py` |
 | 8 | Render completo | `main.py` o UI |
-| 9 | (Opcional) Auth YouTube / cookies TikTok | `client_secrets.json` / `cookies.txt` |
+| 9 | (Opcional) Auth YouTube / cookies TikTok | `client_secrets_NombreCuenta.json` / `cookies.txt` |
 
 ---
 
@@ -321,7 +321,8 @@ viral_clips_v1/
 │   ├── censor.py            # Detección y censura de palabras malsonantes
 │   ├── cache.py             # Caché por vídeo con invalidación por fingerprint de config
 │   ├── gpu_utils.py         # Detección de hardware GPU y configuración de FFmpeg
-│   └── publisher.py         # Publicación a YouTube Shorts y TikTok
+│   ├── publisher.py         # Publicación a YouTube Shorts y TikTok
+│   └── analytics.py         # YouTube Analytics API v2 + Data API v3 (multi-cuenta OAuth2)
 │
 ├── tools/
 │   ├── calibrate.py         # Herramientas de calibración (gpu, webcam, border)
@@ -735,6 +736,7 @@ Resultado cacheado en `segments.json`.
 | `cache.py` | Caché por carpeta/vídeo con fingerprint MD5 de config para invalidación automática; almacena transcripción, segmentos y datos faciales |
 | `gpu_utils.py` | Detecta GPU NVIDIA, selecciona encoder (`h264_nvenc` o `libx264`) y decoder (`cuda` o software), expone resumen de hardware |
 | `publisher.py` | Publicación a YouTube con OAuth2 + `googleapiclient`; publicación a TikTok con Playwright; soporte de programación horaria |
+| `analytics.py` | Dashboard de analítica: YouTube Analytics API v2 + Data API v3. Multi-cuenta OAuth2 (`client_secrets_*.json`). KPIs, tendencias, top vídeos, fuentes de tráfico, dispositivos, geografía, demografía |
 
 ---
 
@@ -799,33 +801,56 @@ Permite editar todos los parámetros del pipeline sin tocar `config.json` direct
 
 ### Pestaña 6 — Analítica
 
-Dashboard profesional de analítica de canal conectado mediante OAuth2 a la **YouTube Analytics API v2** y la **YouTube Data API v3**. Requiere `client_secrets.json` de tipo **Desktop app** (Google Cloud Console).
+Dashboard profesional de analítica de canal conectado mediante OAuth2 a la **YouTube Analytics API v2** y la **YouTube Data API v3**.
 
-#### Configuración inicial (una sola vez)
-1. Crear credencial OAuth 2.0 tipo **Desktop app** en Google Cloud Console → descargar como `client_secrets.json`
+#### Multi-cuenta
+
+La pestaña soporta múltiples cuentas de YouTube simultáneamente. Coloca uno o varios ficheros de credenciales en la raíz del proyecto con la nomenclatura:
+
+```
+client_secrets.json                  → cuenta llamada "default"
+client_secrets_AngelSine.json        → cuenta llamada "AngelSine"
+client_secrets_Empresa.json          → cuenta llamada "Empresa"
+```
+
+Un desplegable **"Cuenta YouTube"** aparece siempre visible en la parte superior de la pestaña. Al cambiar de cuenta, la UI evalúa automáticamente si esa cuenta tiene sesión activa o necesita nueva autenticación.
+
+Cada cuenta tiene su propio token OAuth independiente:
+- `client_secrets_AngelSine.json` → `token_analytics_AngelSine.pickle`
+- `client_secrets.json` → `token_analytics_default.pickle`
+
+Desconectar solo borra el token de la cuenta activa, sin afectar a las demás.
+
+#### Configuración inicial (una sola vez por cuenta)
+1. Crear credencial OAuth 2.0 tipo **Desktop app** en Google Cloud Console → descargar como `client_secrets_NombreCuenta.json`
 2. En *OAuth consent screen → Público → Usuarios de prueba*: añadir el email del canal
 3. Activar las APIs: **YouTube Data API v3** y **YouTube Analytics API**
-4. Pulsar **🔗 Conectar YouTube** en la pestaña → completar el flujo OAuth en el navegador
-5. El token se guarda en `token_analytics.pickle` (separado de `token.pickle` de publicación)
+4. Seleccionar la cuenta en el desplegable y pulsar **🔗 Conectar YouTube** → completar el flujo OAuth en el navegador
 
 #### Filtros
-- **Tipo de contenido**: Todos / Shorts / Vídeos _(aplica solo a Top vídeos; la API no soporta este filtro en series temporales)_
-- **Periodo**: 1 día · 7 días · 14 días · 28 días · 1 mes · Histórico
+
+| Filtro | Opciones |
+|---|---|
+| **Cuenta** | Desplegable con todas las cuentas detectadas automáticamente |
+| **Tipo de contenido** | Todos / Shorts / Vídeos _(aplica solo a Top vídeos — limitación de la API)_ |
+| **Periodo** | 1 día · 7 días · 14 días · 28 días · 1 mes · 2 meses · 3 meses · 4 meses · 5 meses · 6 meses · Histórico |
+| **Histórico — rango personalizado** | Date pickers de inicio y fin (ajustados automáticamente al primer día del mes) |
+| **Histórico — granularidad** | Diario / Mensual (la API exige que inicio y fin sean primer día de mes para granularidad mensual) |
 
 #### Secciones del dashboard
 
 | Sección | Descripción |
 |---|---|
 | **Header de canal** | Nombre, suscriptores totales, vistas totales, nº de vídeos |
-| **KPIs (6 métricas)** | Vistas · Horas visionadas · Engagement Rate % · Suscriptores netos · Shares · Duración media — con delta % vs periodo anterior |
+| **KPIs (6 métricas)** | Vistas · Horas visionadas · Tasa de interacción % · Suscriptores netos · Shares · Duración media — con delta % vs periodo anterior |
 | **Tendencia temporal** | 4 tabs: Vistas (área+línea) · Engagement (área apilada likes/comentarios/shares) · Suscriptores (ganados vs perdidos) · Tiempo visionado |
 | **Mejor día para publicar** | Últimos 90 días agrupados por día de la semana: media de vistas y engagement rate. Recomendación automática |
-| **Top vídeos del periodo** | Hasta 200 vídeos con: Título · Vistas · ER% · Duración media · Likes · Comentarios · Shares · Subs ganados. Barras de progreso visuales |
+| **Top vídeos del periodo** | Hasta 200 vídeos con: Título · Vistas · Tasa interacción % · Duración media · Likes · Comentarios · Shares · Subs ganados. Barras de progreso visuales |
 | **Fuentes de tráfico** | Barras horizontales con % por fuente (Sugeridos, Búsqueda, Externo, etc.). Alerta si Vídeos sugeridos > 40% |
-| **Suscriptores vs no suscriptores** | Donut chart + tabla comparativa. Indicador automático de alcance viral |
-| **Dispositivos** | Donut chart: Móvil / PC / Tablet / TV / Consola. Alerta si móvil > 70% confirma formato 9:16 |
-| **Distribución geográfica** | Top 15 países por vistas con porcentaje |
-| **Demografía de audiencia** | Barras agrupadas por edad y género con segmento dominante destacado |
+| **Suscriptores vs no suscriptores** | Donut chart + tabla comparativa (vistas, horas visionadas, duración media). Indicador automático de alcance viral |
+| **Dispositivos** | 2 tabs: Vistas y Tiempo de visualización — donut chart por dispositivo (Móvil / PC / Tablet / TV / Consola). Tabla con Vistas, % y Horas. Alerta si móvil > 70% confirma formato 9:16 |
+| **Distribución geográfica** | 2 tabs: Vistas y Tiempo de visualización — top 15 países con barras horizontales y %. Tabla con Vistas, % Vistas y Horas |
+| **Demografía de audiencia** | Barras agrupadas por edad y género (requiere periodo con datos suficientes). Segmento dominante destacado |
 | **TikTok Analytics** | Placeholder — pendiente de aprobación de la TikTok for Business API |
 
 #### Métricas no disponibles en la API pública
@@ -890,7 +915,7 @@ python tools/calibrate.py border --file stream.mp4 --second 120 --second2 300
 
 **Requisitos:**
 1. Crear proyecto en [Google Cloud Console](https://console.cloud.google.com) con **YouTube Data API v3** habilitada
-2. Crear credenciales OAuth2 (tipo "Desktop") y descargar `client_secrets.json` en la raíz del proyecto
+2. Crear credenciales OAuth2 (tipo "Desktop") y descargar como `client_secrets.json` o `client_secrets_NombreCuenta.json` en la raíz del proyecto
 3. La primera ejecución del Paso 8 abre el navegador para autorización — genera `token.pickle` para ejecuciones futuras
 
 ### TikTok
