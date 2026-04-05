@@ -18,11 +18,37 @@ _SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
-_TOKEN_FILE   = Path("token_analytics.pickle")
-_SECRETS_FILE = Path("client_secrets.json")
+_active_account: str = ""
 
 # Último error de API expuesto a la UI
 last_error: str = ""
+
+
+def list_accounts() -> dict:
+    """Devuelve {nombre: Path} para cada client_secrets*.json encontrado."""
+    accounts: dict = {}
+    legacy = Path("client_secrets.json")
+    if legacy.exists():
+        accounts["default"] = legacy
+    for p in sorted(Path(".").glob("client_secrets_*.json")):
+        name = p.stem[len("client_secrets_"):]
+        accounts[name] = p
+    return accounts
+
+
+def set_active_account(name: str) -> None:
+    global _active_account
+    _active_account = name
+
+
+def get_active_account() -> str:
+    return _active_account
+
+
+# Inicializar al primer account disponible al importar
+_accs_init = list_accounts()
+if _accs_init:
+    _active_account = next(iter(_accs_init))
 
 _METRICS_DAILY = [
     "views",
@@ -51,6 +77,17 @@ _RENAME = {
 
 # ── Autenticación ──────────────────────────────────────────────────────────────
 
+def _resolve_account_files() -> tuple:
+    """Devuelve (secrets_file, token_file) para el account activo."""
+    accounts = list_accounts()
+    if not accounts:
+        return None, None
+    name = _active_account if _active_account in accounts else next(iter(accounts))
+    secrets_file = accounts[name]
+    token_file   = Path(f"token_analytics_{name}.pickle")
+    return secrets_file, token_file
+
+
 def _get_yt_credentials():
     try:
         from google.auth.transport.requests import Request
@@ -59,12 +96,13 @@ def _get_yt_credentials():
         logger.error("Ejecuta: pip install google-api-python-client google-auth-oauthlib")
         return None
 
-    if not _SECRETS_FILE.exists():
+    secrets_file, token_file = _resolve_account_files()
+    if secrets_file is None:
         return None
 
     credentials = None
-    if _TOKEN_FILE.exists():
-        with open(_TOKEN_FILE, "rb") as f:
+    if token_file.exists():
+        with open(token_file, "rb") as f:
             credentials = pickle.load(f)
 
     if credentials and credentials.valid:
@@ -73,25 +111,26 @@ def _get_yt_credentials():
     if credentials and credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(Request())
-            with open(_TOKEN_FILE, "wb") as f:
+            with open(token_file, "wb") as f:
                 pickle.dump(credentials, f)
             return credentials
         except Exception as exc:
             logger.warning(f"No se pudo refrescar token: {exc}")
-            _TOKEN_FILE.unlink(missing_ok=True)
+            token_file.unlink(missing_ok=True)
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(_SECRETS_FILE), _SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(secrets_file), _SCOPES)
     credentials = flow.run_local_server(port=0, prompt="consent", open_browser=True)
-    with open(_TOKEN_FILE, "wb") as f:
+    with open(token_file, "wb") as f:
         pickle.dump(credentials, f)
     return credentials
 
 
 def is_connected() -> bool:
-    if not _TOKEN_FILE.exists():
+    _, token_file = _resolve_account_files()
+    if token_file is None or not token_file.exists():
         return False
     try:
-        with open(_TOKEN_FILE, "rb") as f:
+        with open(token_file, "rb") as f:
             creds = pickle.load(f)
         return creds is not None and (creds.valid or bool(creds.refresh_token))
     except Exception:
@@ -107,7 +146,9 @@ def connect_youtube() -> bool:
 
 
 def disconnect_youtube():
-    _TOKEN_FILE.unlink(missing_ok=True)
+    _, token_file = _resolve_account_files()
+    if token_file is not None:
+        token_file.unlink(missing_ok=True)
 
 
 # ── Rangos de fecha ────────────────────────────────────────────────────────────
@@ -126,12 +167,27 @@ def date_range(period: str) -> tuple[str, str]:
     today            = date.today()
     yesterday        = today - timedelta(days=1)
     last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+    def _months_ago(n: int) -> date:
+        """Primer día del mes de hace N meses."""
+        m = today.month - n
+        y = today.year + m // 12
+        m = m % 12 or 12
+        if m == 12:
+            y -= 1
+        return date(y, m, 1)
+
     mapping = {
         "1 día":    (yesterday,             yesterday),
         "7 días":   (today - timedelta(7),  yesterday),
         "14 días":  (today - timedelta(14), yesterday),
         "28 días":  (today - timedelta(28), yesterday),
         "1 mes":    (today.replace(day=1),  yesterday),
+        "2 meses":  (_months_ago(2),        yesterday),
+        "3 meses":  (_months_ago(3),        yesterday),
+        "4 meses":  (_months_ago(4),        yesterday),
+        "5 meses":  (_months_ago(5),        yesterday),
+        "6 meses":  (_months_ago(6),        yesterday),
         "Histórico":(date(2020, 1, 1),      last_month_start),
     }
     s, e = mapping.get(period, (today - timedelta(7), yesterday))
@@ -142,6 +198,14 @@ def _prev_date_range(period: str) -> Optional[tuple[str, str]]:
     """Devuelve el rango equivalente del periodo ANTERIOR para calcular deltas."""
     today     = date.today()
     yesterday = today - timedelta(days=1)
+
+    def _first_of_month(d: date, offset: int) -> date:
+        """Primer día del mes desplazado offset meses desde d."""
+        m = d.month + offset
+        y = d.year + (m - 1) // 12
+        m = (m - 1) % 12 + 1
+        return date(y, m, 1)
+
     if period == "1 día":
         d = yesterday - timedelta(1)
         return str(d), str(d)
@@ -154,9 +218,18 @@ def _prev_date_range(period: str) -> Optional[tuple[str, str]]:
     if period == "1 mes":
         first_this = today.replace(day=1)
         last_prev  = first_this - timedelta(1)
-        first_prev = last_prev.replace(day=1)
-        return str(first_prev), str(last_prev)
-    return None  # Histórico
+        return str(last_prev.replace(day=1)), str(last_prev)
+
+    # N meses: periodo anterior = mismo número de meses N meses antes
+    _mes_map = {"2 meses": 2, "3 meses": 3, "4 meses": 4, "5 meses": 5, "6 meses": 6}
+    if period in _mes_map:
+        n = _mes_map[period]
+        start_curr = _first_of_month(today, -n)
+        start_prev = _first_of_month(today, -2 * n)
+        end_prev   = start_curr - timedelta(1)
+        return str(start_prev), str(end_prev)
+
+    return None  # Histórico y custom
 
 
 # ── Core query ─────────────────────────────────────────────────────────────────
@@ -510,23 +583,29 @@ _DEVICE_LABELS = {
 def get_device_types(period: str) -> Optional[pd.DataFrame]:
     """
     Distribución de vistas por tipo de dispositivo.
-    Retorna DataFrame: {dispositivo, vistas, pct}
+    Retorna DataFrame: {dispositivo, vistas, porcentaje, horas_visionadas}
     """
     creds = _get_yt_credentials()
     if not creds:
         return None
     start, end = date_range(period)
-    df = _query_report(creds, start, end, "deviceType", ["views"])
+    df = _query_report(creds, start, end, "deviceType", ["views", "estimatedMinutesWatched"])
     if df is None or df.empty:
         return df
-    df = df.rename(columns={"deviceType": "dispositivo_raw", "views": "vistas"})
+    df = df.rename(columns={
+        "deviceType":              "dispositivo_raw",
+        "views":                   "vistas",
+        "estimatedMinutesWatched": "minutos_visionados",
+    })
     df["dispositivo"] = df["dispositivo_raw"].map(
         lambda x: _DEVICE_LABELS.get(x, x)
     )
     df["vistas"] = df["vistas"].astype(int)
+    df["minutos_visionados"] = df["minutos_visionados"].astype(int)
+    df["horas_visionadas"] = (df["minutos_visionados"] / 60).round(1)
     total = df["vistas"].sum()
     df["porcentaje"] = ((df["vistas"] / total * 100).round(1) if total > 0 else 0.0).fillna(0)
-    return df[["dispositivo", "vistas", "porcentaje"]].sort_values("vistas", ascending=False)
+    return df[["dispositivo", "vistas", "porcentaje", "horas_visionadas"]].sort_values("vistas", ascending=False)
 
 
 # ── Distribución geográfica ────────────────────────────────────────────────────

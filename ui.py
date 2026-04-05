@@ -246,7 +246,7 @@ with tab_cache:
 
                     with col1:
                         if st.button("🗑️ Borrar seleccionados", key=f"btn_del_{vc.name}",
-                                     disabled=not parts_to_delete, use_container_width=True,
+                                     disabled=not parts_to_delete, width="stretch",
                                      type="primary"):
                             deleted = []
                             if "transcription" in parts_to_delete:
@@ -279,14 +279,14 @@ with tab_cache:
 
                     with col2:
                         if st.button("💣 Borrar proyecto completo", key=f"btn_del_all_{vc.name}",
-                                     type="secondary", use_container_width=True):
+                                     type="secondary", width="stretch"):
                             _shutil.rmtree(vc, ignore_errors=True)
                             _append_log(f"💣 Caché eliminada: {vc.name}")
                             st.success(f"✅ Caché de {vc.name} eliminada.")
                             st.rerun()
 
         st.divider()
-        if st.button("💣 Limpiar TODO", type="secondary", use_container_width=True):
+        if st.button("💣 Limpiar TODO", type="secondary", width="stretch"):
             _shutil.rmtree(cache_dir, ignore_errors=True)
             cache_dir.mkdir(parents=True, exist_ok=True)
             _append_log("💣 Caché completa eliminada.")
@@ -303,7 +303,7 @@ with tab_tools:
     # ── GPU ───────────────────────────────────────────────────────────────────
     st.markdown("#### 🖥️ Diagnóstico GPU")
     st.caption("Comprueba drivers NVIDIA, PyTorch CUDA, FFmpeg NVENC y el encoder h264_nvenc.")
-    if st.button("▶ Ejecutar diagnóstico GPU", key="btn_gpu", use_container_width=True):
+    if st.button("▶ Ejecutar diagnóstico GPU", key="btn_gpu", width="stretch"):
         _append_log("▶ Iniciando diagnóstico GPU...")
         rc = _run_with_log(["python", "-u", "tools/calibrate.py", "gpu"], LOG_PLACEHOLDER)
         if rc == 0:
@@ -325,7 +325,7 @@ with tab_tools:
     with col_wc2:
         wc_second = st.number_input("Segundo", min_value=0, value=60, step=10, key="wc_second")
 
-    if st.button("▶ Abrir selector de webcam", key="btn_webcam", use_container_width=True):
+    if st.button("▶ Abrir selector de webcam", key="btn_webcam", width="stretch"):
         _append_log(f"▶ Webcam calibration: {Path(wc_file).name}  s={wc_second}")
         rc = _run_with_log(
             ["python", "-u", "tools/calibrate.py", "webcam",
@@ -354,7 +354,7 @@ with tab_tools:
         bd_second2_raw = st.number_input("Segundo 2 (sin cámara)", min_value=0, value=0, step=10, key="bd_second2",
                                           help="Opcional. Deja en 0 para omitir.")
 
-    if st.button("▶ Medir border ratio", key="btn_border", use_container_width=True):
+    if st.button("▶ Medir border ratio", key="btn_border", width="stretch"):
         _append_log(f"▶ Border calibration: {Path(bd_file).name}  s={bd_second}")
         cmd = ["python", "-u", "tools/calibrate.py", "border",
                "--file", bd_file, "--second", str(bd_second)]
@@ -400,7 +400,7 @@ with tab_lanzador:
 
     if st.session_state["running"]:
         st.warning("⏳ Ya hay un proceso en ejecución. Espera a que termine.")
-    elif st.button("▶️ Lanzar Procesamiento Seleccionado", type="primary", use_container_width=True):
+    elif st.button("▶️ Lanzar Procesamiento Seleccionado", type="primary", width="stretch"):
         if not tareas_a_ejecutar:
             st.error("No has marcado ningún vídeo para procesar.")
         else:
@@ -641,7 +641,7 @@ with tab_revisor:
             st.markdown("### 🔥 Paso Final")
             if st.session_state["running"]:
                 st.warning("⏳ Ya hay un proceso en ejecución. Espera a que termine.")
-            elif st.button("🎬 Renderizar y Publicar Clips Aprobados (Pasos 3 al 8)", type="primary", use_container_width=True):
+            elif st.button("🎬 Renderizar y Publicar Clips Aprobados (Pasos 3 al 8)", type="primary", width="stretch"):
                 st.session_state["running"] = True
                 _append_log(f"▶ Renderizando: {selected_video.name}")
                 cmd = ["python", "-u", "main.py", "--file", str(selected_video), "--max-step", "8"]
@@ -928,7 +928,7 @@ with tab_config:
 
     # ── Guardar ──────────────────────────────────────────────────────────────────
     st.divider()
-    if st.button("💾 Guardar Configuración", type="primary", use_container_width=True):
+    if st.button("💾 Guardar Configuración", type="primary", width="stretch"):
         cfg_new = _copy.deepcopy(cfg)
 
         # Streamer
@@ -1009,7 +1009,7 @@ with tab_analytics:
         get_top_videos, get_day_of_week_stats,
     )
 
-    _PERIODOS = ["1 día", "7 días", "14 días", "28 días", "1 mes", "Histórico"]
+    _PERIODOS = ["1 día", "7 días", "14 días", "28 días", "1 mes", "2 meses", "3 meses", "4 meses", "5 meses", "6 meses", "Histórico"]
     _TIPOS    = ["Todos", "Shorts", "Vídeos"]
 
     # Paleta
@@ -1029,19 +1029,37 @@ with tab_analytics:
     # ── YouTube ────────────────────────────────────────────────────────────────
     st.subheader("📺 YouTube Analytics")
 
-    if not Path("client_secrets.json").exists():
+    from modules.analytics import list_accounts, set_active_account, get_active_account
+    _accounts = list_accounts()
+    if not _accounts:
         st.warning(
-            "Falta `client_secrets.json`. Descárgalo desde Google Cloud Console "
-            "→ APIs & Services → Credentials → OAuth 2.0 Client ID → tipo **Desktop app**."
+            "No se encontró ningún fichero de credenciales. "
+            "Añade `client_secrets.json` o `client_secrets_NombreCuenta.json` "
+            "descargado de Google Cloud Console → APIs & Services → Credentials "
+            "→ OAuth 2.0 Client ID → tipo **Desktop app**."
         )
         st.stop()
+
+    # ── Selector de cuenta ─────────────────────────────────────────────────
+    _account_names = list(_accounts.keys())
+    _cur_account   = get_active_account()
+    _sel_account   = st.selectbox(
+        "Cuenta YouTube",
+        _account_names,
+        index=_account_names.index(_cur_account) if _cur_account in _account_names else 0,
+        key="yt_account",
+    )
+    if _sel_account != _cur_account:
+        set_active_account(_sel_account)
+        st.rerun()
 
     yt_connected = is_connected()
 
     if not yt_connected:
         st.info(
             "**Requisito previo (una sola vez):**  \n"
-            "1. Credencial OAuth tipo **Desktop app** → `client_secrets.json`  \n"
+            "1. Credencial OAuth tipo **Desktop app** → `client_secrets.json` "
+            "o `client_secrets_NombreCuenta.json`  \n"
             "2. *OAuth consent screen → Público → Usuarios de prueba* → añade tu email  \n"
             "3. Activa: **YouTube Data API v3** y **YouTube Analytics API**"
         )
@@ -1190,7 +1208,7 @@ with tab_analytics:
                     tooltip=["fecha", "vistas", "likes", "comentarios", "shares"],
                 )
             ).properties(height=280)
-            st.altair_chart(ch, use_container_width=True)
+            st.altair_chart(ch, width="stretch")
 
         with t_eng:
             df_eng = df[["fecha", "likes", "comentarios", "shares"]].melt(
@@ -1211,7 +1229,7 @@ with tab_analytics:
                 )
                 .properties(height=280)
             )
-            st.altair_chart(ch, use_container_width=True)
+            st.altair_chart(ch, width="stretch")
             st.caption(
                 f"Engagement rate medio: **{avg_er:.2f}%** "
                 f"({'sin comparativa' if prev is None else 'vs ' + str(round(prev.get('engagement_rate', 0), 2)) + '% periodo anterior'})"
@@ -1236,7 +1254,7 @@ with tab_analytics:
                 )
                 .properties(height=280)
             )
-            st.altair_chart(ch, use_container_width=True)
+            st.altair_chart(ch, width="stretch")
 
         with t_time:
             df_t = df.copy()
@@ -1251,7 +1269,7 @@ with tab_analytics:
                     tooltip=["fecha", "horas", "vistas"],
                 )
             ).properties(height=280)
-            st.altair_chart(ch, use_container_width=True)
+            st.altair_chart(ch, width="stretch")
 
         st.divider()
 
@@ -1270,7 +1288,7 @@ with tab_analytics:
                     )
                     .properties(title="Media de vistas por día", height=220)
                 )
-                st.altair_chart(ch_views, use_container_width=True)
+                st.altair_chart(ch_views, width="stretch")
             with col_b:
                 ch_er = (
                     alt.Chart(df_dow)
@@ -1282,7 +1300,7 @@ with tab_analytics:
                     )
                     .properties(title="Engagement Rate medio por día", height=220)
                 )
-                st.altair_chart(ch_er, use_container_width=True)
+                st.altair_chart(ch_er, width="stretch")
 
             # Recomendación automática
             best_views = df_dow.loc[df_dow["vistas_media"].idxmax(), "dia_semana"]
@@ -1312,7 +1330,7 @@ with tab_analytics:
                 })
                 .bar(subset=["vistas"], color=f"{_CV}33")
                 .bar(subset=["er_pct"], color=f"{_CE}33"),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "título":       st.column_config.TextColumn("Título", width="large"),
@@ -1379,7 +1397,7 @@ with tab_analytics:
                     text=alt.Text("porcentaje:Q", format=".1f", formatType="number"),
                 )
             )
-            st.altair_chart((ch_traffic + pct_text), use_container_width=True)
+            st.altair_chart((ch_traffic + pct_text), width="stretch")
         else:
             st.caption("Sin datos de fuentes de tráfico.")
 
@@ -1423,7 +1441,7 @@ with tab_analytics:
                     )
                     .properties(height=220)
                 )
-                st.altair_chart(ch_subs, use_container_width=True)
+                st.altair_chart(ch_subs, width="stretch")
 
             # Tabla comparativa de métricas
             df_subs_display = df_subs_st.copy()
@@ -1438,7 +1456,7 @@ with tab_analytics:
             st.dataframe(
                 df_subs_display[["estado", "vistas", "porcentaje", "horas_visionadas", "duración_media"]]
                 .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
         else:
             st.caption("Sin datos de estado de suscripción.")
@@ -1450,24 +1468,51 @@ with tab_analytics:
         if df_devices is not None and not df_devices.empty:
             col_d1, col_d2 = st.columns([1, 1])
             with col_d1:
-                ch_dev = (
-                    alt.Chart(df_devices)
-                    .mark_arc(innerRadius=50)
-                    .encode(
-                        theta=alt.Theta("vistas:Q"),
-                        color=alt.Color("dispositivo:N",
-                            scale=alt.Scale(scheme="tableau10"),
-                            legend=alt.Legend(title=""),
-                        ),
-                        tooltip=["dispositivo", "vistas", "porcentaje"],
+                dev_tab_v, dev_tab_h = st.tabs(["Vistas", "Tiempo de visualización"])
+                with dev_tab_v:
+                    ch_dev = (
+                        alt.Chart(df_devices)
+                        .mark_arc(innerRadius=50)
+                        .encode(
+                            theta=alt.Theta("vistas:Q"),
+                            color=alt.Color("dispositivo:N",
+                                scale=alt.Scale(scheme="tableau10"),
+                                legend=alt.Legend(title=""),
+                            ),
+                            tooltip=["dispositivo", "vistas", "porcentaje", "horas_visionadas"],
+                        )
+                        .properties(height=240)
                     )
-                    .properties(height=240)
-                )
-                st.altair_chart(ch_dev, use_container_width=True)
+                    st.altair_chart(ch_dev, width="stretch")
+                with dev_tab_h:
+                    ch_dev_h = (
+                        alt.Chart(df_devices)
+                        .mark_arc(innerRadius=50)
+                        .encode(
+                            theta=alt.Theta("horas_visionadas:Q"),
+                            color=alt.Color("dispositivo:N",
+                                scale=alt.Scale(scheme="tableau10"),
+                                legend=alt.Legend(title=""),
+                            ),
+                            tooltip=["dispositivo", "horas_visionadas", "vistas"],
+                        )
+                        .properties(height=240)
+                    )
+                    st.altair_chart(ch_dev_h, width="stretch")
             with col_d2:
                 st.dataframe(
-                    df_devices.style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
-                    hide_index=True, use_container_width=True,
+                    df_devices.style.format({
+                        "vistas":           "{:,}",
+                        "porcentaje":       "{:.1f}%",
+                        "horas_visionadas": "{:.1f}h",
+                    }),
+                    hide_index=True, width="stretch",
+                    column_config={
+                        "dispositivo":      st.column_config.TextColumn("Dispositivo"),
+                        "vistas":           st.column_config.NumberColumn("Vistas"),
+                        "porcentaje":       st.column_config.NumberColumn("% Vistas"),
+                        "horas_visionadas": st.column_config.NumberColumn("Horas"),
+                    },
                 )
                 mobile = df_devices[df_devices["dispositivo"] == "Móvil"]
                 if not mobile.empty and mobile.iloc[0]["porcentaje"] >= 70:
@@ -1480,33 +1525,64 @@ with tab_analytics:
         # ── 4. Distribución geográfica ─────────────────────────────────────
         st.markdown("### 🌍 Distribución geográfica")
         if df_countries is not None and not df_countries.empty:
+            df_countries = df_countries.copy()
+            df_countries["horas_visionadas"] = (df_countries["minutos_visionados"] / 60).round(1)
             col_g1, col_g2 = st.columns([2, 1])
             with col_g1:
-                ch_geo = (
-                    alt.Chart(df_countries.head(10))
-                    .mark_bar(color=_CS, opacity=0.85)
-                    .encode(
-                        x=alt.X("vistas:Q", title="Vistas"),
-                        y=alt.Y("país:N", sort="-x", title=""),
-                        tooltip=["país", "vistas", "porcentaje"],
+                geo_tab_v, geo_tab_h = st.tabs(["Vistas", "Tiempo de visualización"])
+                with geo_tab_v:
+                    ch_geo = (
+                        alt.Chart(df_countries.head(10))
+                        .mark_bar(color=_CS, opacity=0.85)
+                        .encode(
+                            x=alt.X("vistas:Q", title="Vistas"),
+                            y=alt.Y("país:N", sort="-x", title=""),
+                            tooltip=["país", "vistas", "porcentaje", "horas_visionadas"],
+                        )
+                        .properties(height=300)
                     )
-                    .properties(height=300)
-                )
-                pct_geo = (
-                    alt.Chart(df_countries.head(10))
-                    .mark_text(align="left", dx=4, color="#8B8FA8")
-                    .encode(
-                        x="vistas:Q",
-                        y=alt.Y("país:N", sort="-x"),
-                        text=alt.Text("porcentaje:Q", format=".1f"),
+                    pct_geo = (
+                        alt.Chart(df_countries.head(10))
+                        .mark_text(align="left", dx=4, color="#8B8FA8")
+                        .encode(
+                            x="vistas:Q",
+                            y=alt.Y("país:N", sort="-x"),
+                            text=alt.Text("porcentaje:Q", format=".1f"),
+                        )
                     )
-                )
-                st.altair_chart(ch_geo + pct_geo, use_container_width=True)
+                    st.altair_chart(ch_geo + pct_geo, width="stretch")
+                with geo_tab_h:
+                    ch_geo_h = (
+                        alt.Chart(df_countries.head(10))
+                        .mark_bar(color=_CE, opacity=0.85)
+                        .encode(
+                            x=alt.X("horas_visionadas:Q", title="Horas visionadas"),
+                            y=alt.Y("país:N", sort="-x", title=""),
+                            tooltip=["país", "horas_visionadas", "vistas"],
+                        )
+                        .properties(height=300)
+                    )
+                    h_text = (
+                        alt.Chart(df_countries.head(10))
+                        .mark_text(align="left", dx=4, color="#8B8FA8")
+                        .encode(
+                            x="horas_visionadas:Q",
+                            y=alt.Y("país:N", sort="-x"),
+                            text=alt.Text("horas_visionadas:Q", format=".1f"),
+                        )
+                    )
+                    st.altair_chart(ch_geo_h + h_text, width="stretch")
             with col_g2:
                 st.dataframe(
-                    df_countries[["país", "vistas", "porcentaje"]]
-                    .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
-                    hide_index=True, use_container_width=True,
+                    df_countries[["país", "vistas", "porcentaje", "horas_visionadas"]]
+                    .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%", "horas_visionadas": "{:.1f}h"}),
+                    hide_index=True, width="stretch",
+                    column_config={
+                        "país":             st.column_config.TextColumn("País"),
+                        "vistas":           st.column_config.NumberColumn("Vistas"),
+                        "porcentaje":       st.column_config.NumberColumn("% Vistas"),
+                        "horas_visionadas": st.column_config.NumberColumn("Horas"),
+                    },
                 )
         else:
             st.caption("Sin datos geográficos.")
@@ -1537,7 +1613,7 @@ with tab_analytics:
                 )
                 .properties(height=300)
             )
-            st.altair_chart(ch_demo, use_container_width=True)
+            st.altair_chart(ch_demo, width="stretch")
 
             # Resumen
             top_seg = df_demo.loc[df_demo["porcentaje"].idxmax()]

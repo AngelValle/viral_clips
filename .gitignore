@@ -6,5 +6,5 @@ venv/
 *.mkv
 *.avi
 *.mov
-client_secrets.json
-token_analytics.pickle
+client_secrets_AngelSine.json
+token_analytics_AngelSine.pickle
