@@ -669,6 +669,52 @@ with tab_config:
     def _save_cfg(cfg: dict):
         CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # ── Helpers de color BGR ↔ hex ────────────────────────────────────────────
+    def _bgr_to_hex(bgr: list) -> str:
+        b, g, r = int(bgr[0]), int(bgr[1]), int(bgr[2])
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    def _hex_to_bgr(hex_str: str) -> list:
+        h = hex_str.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return [b, g, r]
+
+    # ── Lista de fuentes del sistema ──────────────────────────────────────────
+    @st.cache_data
+    def _list_system_fonts() -> list:
+        try:
+            import winreg, re as _re
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",
+            )
+            names, i = [], 0
+            while True:
+                try:
+                    name, _, _ = winreg.EnumValue(key, i)
+                    clean = _re.sub(r"\s*\(.*?\)\s*$", "", name).strip()
+                    if clean:
+                        names.append(clean)
+                    i += 1
+                except OSError:
+                    break
+            winreg.CloseKey(key)
+            return sorted(set(names), key=str.lower)
+        except Exception:
+            pass
+        # Fallback: escanear directorio de fuentes
+        import os
+        fonts = set()
+        for d in [r"C:\Windows\Fonts",
+                  os.path.expanduser(r"~\AppData\Local\Microsoft\Windows\Fonts")]:
+            if not os.path.isdir(d):
+                continue
+            for fname in os.listdir(d):
+                stem, ext = os.path.splitext(fname)
+                if ext.lower() in (".ttf", ".otf"):
+                    fonts.add(stem)
+        return sorted(fonts, key=str.lower)
+
     cfg = _load_cfg()
 
     st.markdown("### ⚙️ Configuración del Pipeline")
@@ -696,6 +742,53 @@ with tab_config:
                 index=["gaming", "irl", "just_chatting", "sports", "music"].index(
                     cfg.get("claude", {}).get("content_type", "gaming")
                 ),
+            )
+
+        st.divider()
+        st.markdown("**Overlay del nombre en pantalla**")
+
+        _EFFECT_OPTIONS = ["neón", "sólido", "sombra", "ninguno"]
+        _EFFECT_CFG     = {"neón": "neon", "sólido": "solid", "sombra": "shadow", "ninguno": "ninguno"}
+        _EFFECT_CFG_INV = {v: k for k, v in _EFFECT_CFG.items()}
+
+        _layout_cfg        = cfg.get("layout", {})
+        _effect_current    = _EFFECT_CFG_INV.get(_layout_cfg.get("neon_effect", "neon"), "neón")
+        _default_fx_color  = _bgr_to_hex(_layout_cfg.get("webcam_name_color_bgr", [255, 50, 255]))
+        _default_txt_color = _bgr_to_hex(_layout_cfg.get("neon_text_color_bgr", [255, 255, 255]))
+
+        col_e, col_tc, col_fc, col_sz = st.columns(4)
+        with col_e:
+            name_effect = st.selectbox(
+                "Efecto",
+                options=_EFFECT_OPTIONS,
+                index=_EFFECT_OPTIONS.index(_effect_current),
+                help=(
+                    "**Neón** — texto animado con resplandor y barrido de luz.\n\n"
+                    "**Sólido** — texto plano con outline negro.\n\n"
+                    "**Sombra** — texto con sombra difuminada del color de efecto.\n\n"
+                    "**Ninguno** — sin overlay de nombre."
+                ),
+            )
+        with col_tc:
+            name_text_color = st.color_picker(
+                "Color del texto",
+                value=_default_txt_color,
+                disabled=(name_effect == "ninguno"),
+                help="Color de las letras del nombre.",
+            )
+        with col_fc:
+            name_effect_color = st.color_picker(
+                "Color del efecto",
+                value=_default_fx_color,
+                disabled=(name_effect not in ("neón", "sombra")),
+                help="Color del resplandor (neón) o de la sombra proyectada (sombra).",
+            )
+        with col_sz:
+            name_font_size_ratio = st.slider(
+                "Tamaño (ratio)",
+                min_value=0.2, max_value=1.5, step=0.05,
+                value=float(_layout_cfg.get("neon_font_size_ratio", 0.65)),
+                help="Tamaño de la fuente relativo al alto del recuadro del nombre. 0.65 = default.",
             )
 
     # ── Módulos opcionales ──────────────────────────────────────────────────────
@@ -791,6 +884,16 @@ with tab_config:
                 min_value=1, max_value=9999, value=int(vd.get("top_n_clips", 999)),
                 help="Limita cuántos clips se generan por vídeo.",
             )
+            allow_multi_fragment = st.toggle(
+                "Permitir clips multi-fragmento",
+                value=bool(vd.get("allow_multi_fragment", True)),
+                help=(
+                    "Activado: Gemini puede proponer clips formados por varios fragmentos "
+                    "discontinuos que se concatenan (jump cuts). "
+                    "Desactivado: cada clip es un único segmento continuo desde el inicio "
+                    "hasta el final del rango (sin cortes internos), aunque sea más largo."
+                ),
+            )
 
         viral_keywords_raw = st.text_area(
             "Keywords virales (una por línea)",
@@ -824,10 +927,14 @@ with tab_config:
                 value=int(sub.get("max_line_width", 20)),
             )
         with col3:
-            sub_font_name = st.text_input(
+            _sys_fonts      = _list_system_fonts()
+            _current_font   = sub.get("font_name", "Showcard Gothic")
+            _font_opts      = _sys_fonts if _current_font in _sys_fonts else [_current_font] + _sys_fonts
+            sub_font_name = st.selectbox(
                 "Fuente",
-                value=sub.get("font_name", "Showcard Gothic"),
-                help="Nombre exacto de la fuente instalada en Windows.",
+                options=_font_opts,
+                index=_font_opts.index(_current_font),
+                help="Fuentes instaladas en el sistema. La fuente elegida se usa tanto en subtítulos como en el overlay del nombre.",
             )
             sub_offset = st.number_input(
                 "Offset manual (s)",
@@ -841,13 +948,19 @@ with tab_config:
         cens = cfg.get("censorship", {})
         col1, col2 = st.columns(2)
         with col1:
-            _cens_options = ["tiktok", "youtube", "instagram", "twitch", "desactivado"]
-            _cens_current = cens.get("mode", "tiktok")
+            _cens_options = ["alto", "medio", "bajo", "personalizado", "desactivado"]
+            _cens_current = cens.get("mode", "medio")
             cens_mode = st.selectbox(
-                "Perfil de censura",
+                "Nivel de censura",
                 options=_cens_options,
-                index=_cens_options.index(_cens_current) if _cens_current in _cens_options else 0,
-                help="Determina el nivel de agresividad del filtro de palabras. 'desactivado' omite la censura por completo.",
+                index=_cens_options.index(_cens_current) if _cens_current in _cens_options else 1,
+                help=(
+                    "**Alto** — todas las palabras malsonantes ES + EN.\n\n"
+                    "**Medio** — solo palabras en español.\n\n"
+                    "**Bajo** — solo las blasfemias más graves (mierda, puta, fuck, shit).\n\n"
+                    "**Personalizado** — únicamente las palabras que añadas tú (sin lista base).\n\n"
+                    "**Desactivado** — sin censura."
+                ),
             )
             beep_freq = st.number_input(
                 "Frecuencia del bip (Hz)", min_value=200, max_value=5000, step=50,
@@ -937,6 +1050,13 @@ with tab_config:
         cfg_new["claude"]["game_name"]     = game_name.strip()
         cfg_new["claude"]["content_type"]  = content_type
 
+        # Overlay del nombre
+        cfg_new.setdefault("layout", {})
+        cfg_new["layout"]["neon_effect"]          = _EFFECT_CFG[name_effect]
+        cfg_new["layout"]["webcam_name_color_bgr"] = _hex_to_bgr(name_effect_color)
+        cfg_new["layout"]["neon_text_color_bgr"]  = _hex_to_bgr(name_text_color)
+        cfg_new["layout"]["neon_font_size_ratio"] = round(name_font_size_ratio, 3)
+
         # Módulos opcionales
         cfg_new.setdefault("face_detection", {})["enabled"] = face_enabled
         cfg_new.setdefault("subtitles", {})["enabled"]      = subtitles_enabled
@@ -961,6 +1081,7 @@ with tab_config:
         cfg_new["viral_detection"]["viral_keywords"]     = [
             kw.strip() for kw in viral_keywords_raw.splitlines() if kw.strip()
         ]
+        cfg_new["viral_detection"]["allow_multi_fragment"] = allow_multi_fragment
 
         # Subtítulos
         cfg_new.setdefault("subtitles", {})
@@ -1007,6 +1128,7 @@ with tab_analytics:
         is_connected, connect_youtube, disconnect_youtube,
         get_channel_overview, get_analytics_with_delta,
         get_top_videos, get_day_of_week_stats,
+        get_monetization_overview,
     )
 
     _PERIODOS = ["1 día", "7 días", "14 días", "28 días", "1 mes", "2 meses", "3 meses", "4 meses", "5 meses", "6 meses", "Histórico"]
@@ -1133,6 +1255,15 @@ with tab_analytics:
                 hist_start = hist_start.replace(day=1)
                 hist_end   = hist_end.replace(day=1)
             yt_periodo = f"custom:{hist_start}:{hist_end}"
+        elif yt_periodo in ("3 meses", "4 meses", "5 meses", "6 meses"):
+            _gran_label = st.radio(
+                "Granularidad",
+                ["Diario", "Mensual"],
+                index=1,
+                horizontal=True,
+                key="multi_month_granularity",
+            )
+            yt_granularity = "day" if _gran_label == "Diario" else "month"
         else:
             yt_granularity = "auto"
 
@@ -1276,37 +1407,57 @@ with tab_analytics:
         # ── Mejor día para publicar ─────────────────────────────────────────
         st.markdown("### 📅 Mejor día para publicar _(últimos 90 días)_")
         if df_dow is not None and not df_dow.empty:
-            col_a, col_b = st.columns(2)
+            _dow_y = alt.Y(
+                "dia_semana:N",
+                sort=alt.EncodingSortField(field="dia_num", order="ascending"),
+                title="",
+                axis=alt.Axis(labelOverlap=False),
+            )
+            col_a, col_b, col_c = st.columns(3)
             with col_a:
                 ch_views = (
                     alt.Chart(df_dow)
                     .mark_bar(color=_CV, opacity=0.85)
                     .encode(
                         x=alt.X("vistas_media:Q", title="Media de vistas"),
-                        y=alt.Y("dia_semana:N", sort=None, title=""),
-                        tooltip=["dia_semana", "vistas_media", "n_dias"],
+                        y=_dow_y,
+                        tooltip=["dia_semana", "vistas_media", "horas_media", "n_dias"],
                     )
-                    .properties(title="Media de vistas por día", height=220)
+                    .properties(title="Media de vistas por día", height=260)
                 )
                 st.altair_chart(ch_views, width="stretch")
             with col_b:
-                ch_er = (
+                ch_hours = (
                     alt.Chart(df_dow)
                     .mark_bar(color=_CE, opacity=0.85)
                     .encode(
+                        x=alt.X("horas_media:Q", title="Media de horas visionadas"),
+                        y=_dow_y,
+                        tooltip=["dia_semana", "horas_media", "vistas_media", "n_dias"],
+                    )
+                    .properties(title="Media de horas visionadas por día", height=260)
+                )
+                st.altair_chart(ch_hours, width="stretch")
+            with col_c:
+                ch_er = (
+                    alt.Chart(df_dow)
+                    .mark_bar(color=_CS, opacity=0.85)
+                    .encode(
                         x=alt.X("engagement_media:Q", title="Engagement Rate (%)"),
-                        y=alt.Y("dia_semana:N", sort=None, title=""),
+                        y=_dow_y,
                         tooltip=["dia_semana", "engagement_media", "n_dias"],
                     )
-                    .properties(title="Engagement Rate medio por día", height=220)
+                    .properties(title="Engagement Rate medio por día", height=260)
                 )
                 st.altair_chart(ch_er, width="stretch")
 
             # Recomendación automática
             best_views = df_dow.loc[df_dow["vistas_media"].idxmax(), "dia_semana"]
+            best_hours = df_dow.loc[df_dow["horas_media"].idxmax(), "dia_semana"]
             best_er    = df_dow.loc[df_dow["engagement_media"].idxmax(), "dia_semana"]
             st.info(
                 f"**Mejor día por vistas:** {best_views} &nbsp;|&nbsp; "
+                f"**Mejor día por horas:** {best_hours} &nbsp;|&nbsp; "
                 f"**Mejor día por engagement:** {best_er}"
             )
         else:
@@ -1363,12 +1514,38 @@ with tab_analytics:
         # ── 1. Fuentes de tráfico ──────────────────────────────────────────
         st.markdown("### 🔎 Fuentes de tráfico")
         if df_traffic is not None and not df_traffic.empty:
-            # Destacar fuente principal
-            top_src = df_traffic.iloc[0]
-            st.caption(
-                f"Fuente principal: **{top_src['fuente']}** — "
-                f"{top_src['vistas']:,} vistas ({top_src['porcentaje']}%)"
-            )
+            # ── Pagado vs orgánico ─────────────────────────────────────────
+            paid_row   = df_traffic[df_traffic["fuente_raw"] == "ADVERTISING"]
+            paid_views = int(paid_row["vistas"].iloc[0]) if not paid_row.empty else 0
+            total_tr   = int(df_traffic["vistas"].sum())
+            org_views  = total_tr - paid_views
+            paid_pct   = round(paid_views / total_tr * 100, 1) if total_tr > 0 else 0.0
+
+            col_org, col_paid, col_pct = st.columns(3)
+            col_org.metric("🌱 Vistas orgánicas",     f"{org_views:,}")
+            col_paid.metric("📣 Vistas de promoción", f"{paid_views:,}")
+            col_pct.metric("📊 % promoción",          f"{paid_pct:.1f}%")
+
+            # Insight pagado/orgánico
+            if paid_pct >= 30:
+                st.warning(f"⚠ {paid_pct}% de las vistas vienen de promociones de YouTube Studio — alta dependencia de tráfico pagado.")
+            elif paid_pct >= 10:
+                st.info(f"ℹ {paid_pct}% de vistas son de pago. Buena combinación de tráfico orgánico y promocionado.")
+            elif paid_pct > 0:
+                st.success(f"✅ Solo {paid_pct}% de vistas son de promoción — contenido principalmente orgánico.")
+
+            # CPV estimado (input manual de presupuesto)
+            if paid_views > 0:
+                presupuesto = st.number_input(
+                    "Presupuesto invertido en promociones (€) — introduce el total gastado en YouTube Studio para este periodo",
+                    min_value=0.0, step=1.0, format="%.2f", key="presupuesto_promo",
+                )
+                if presupuesto > 0:
+                    cpv = presupuesto / paid_views
+                    col_cpv1, col_cpv2 = st.columns(2)
+                    col_cpv1.metric("💶 CPV estimado", f"€{cpv:.4f}")
+                    col_cpv2.metric("👁 Vistas por euro", f"{1 / cpv:.1f}")
+
             # Insight viral: Vídeos sugeridos
             sug = df_traffic[df_traffic["fuente"] == "Vídeos sugeridos"]
             if not sug.empty:
@@ -1378,13 +1555,20 @@ with tab_analytics:
                 elif pct_sug >= 20:
                     st.info(f"ℹ {pct_sug}% de vistas desde 'Vídeos sugeridos'. Aumentar el CTR y retención puede mejorar la distribución orgánica.")
 
+            # Fuente principal
+            top_src = df_traffic.iloc[0]
+            st.caption(
+                f"Fuente principal: **{top_src['fuente']}** — "
+                f"{top_src['vistas']:,} vistas ({top_src['porcentaje']}%)"
+            )
+
             ch_traffic = (
                 alt.Chart(df_traffic)
                 .mark_bar(color=_CV, opacity=0.85)
                 .encode(
                     x=alt.X("vistas:Q", title="Vistas"),
                     y=alt.Y("fuente:N", sort="-x", title=""),
-                    tooltip=["fuente", "vistas", "porcentaje"],
+                    tooltip=["fuente", "vistas", "porcentaje", "horas_visionadas"],
                 )
                 .properties(height=max(200, len(df_traffic) * 32))
             )
@@ -1398,8 +1582,71 @@ with tab_analytics:
                 )
             )
             st.altair_chart((ch_traffic + pct_text), width="stretch")
+
+            _total_h_tr = df_traffic["horas_visionadas"].sum()
+            _df_tr_disp = df_traffic.copy()
+            _df_tr_disp["pct_horas"] = (
+                (_df_tr_disp["horas_visionadas"] / _total_h_tr * 100).round(1)
+                if _total_h_tr > 0 else 0.0
+            )
+            st.dataframe(
+                _df_tr_disp[["fuente", "vistas", "porcentaje", "horas_visionadas", "pct_horas"]]
+                .style.format({
+                    "vistas":           "{:,}",
+                    "porcentaje":       "{:.1f}%",
+                    "horas_visionadas": "{:.1f}h",
+                    "pct_horas":        "{:.1f}%",
+                }),
+                hide_index=True, width="stretch",
+                column_config={
+                    "fuente":           st.column_config.TextColumn("Fuente"),
+                    "vistas":           st.column_config.NumberColumn("Vistas"),
+                    "porcentaje":       st.column_config.NumberColumn("% Vistas"),
+                    "horas_visionadas": st.column_config.NumberColumn("Horas"),
+                    "pct_horas":        st.column_config.NumberColumn("% Horas"),
+                },
+            )
         else:
             st.caption("Sin datos de fuentes de tráfico.")
+
+        st.divider()
+
+        # ── Promociones de YouTube Studio ──────────────────────────────────
+        st.markdown("### 📣 Promociones de YouTube Studio")
+
+        _paid_row   = df_traffic[df_traffic["fuente_raw"] == "ADVERTISING"] if df_traffic is not None else None
+        _paid_views = int(_paid_row["vistas"].iloc[0])             if _paid_row is not None and not _paid_row.empty else 0
+        _paid_hours = float(_paid_row["horas_visionadas"].iloc[0]) if _paid_row is not None and not _paid_row.empty else 0.0
+
+        if _paid_views > 0:
+            col_p1, col_p2 = st.columns(2)
+            col_p1.metric("▶ Vistas de promoción (total canal)", f"{_paid_views:,}")
+            col_p2.metric("⏱ Horas visionadas (pago)", f"{_paid_hours:.1f}h")
+
+            st.markdown("#### Calculadora de eficiencia")
+            presupuesto_total = st.number_input(
+                "Presupuesto total invertido en promociones (\u20ac)",
+                min_value=0.0, step=1.0, format="%.2f",
+                key="presupuesto_promo_total",
+                help="Consulta el importe en YouTube Studio -> Contenido -> Promociones",
+            )
+            if presupuesto_total > 0:
+                cpv = presupuesto_total / _paid_views
+                vpe = 1 / cpv
+                col_c1, col_c2, col_c3 = st.columns(3)
+                col_c1.metric("💶 CPV (coste por vista)", f"\u20ac{cpv:.4f}")
+                col_c2.metric("👁 Vistas por euro",       f"{vpe:.1f}")
+                col_c3.metric("📊 Coste por hora visionada",
+                              f"\u20ac{presupuesto_total / _paid_hours:.2f}" if _paid_hours > 0 else "—")
+
+            st.info(
+                "La YouTube Analytics API no permite identificar **qué vídeos específicos** "
+                "recibieron tráfico de promociones — solo expone el total del canal. "
+                "Para ver los vídeos promocionados y su gasto individual, "
+                "consulta **YouTube Studio → Contenido → Promociones**."
+            )
+        else:
+            st.caption("No se han detectado vistas de promociones en este periodo. Prueba a ampliar el rango de fechas.")
 
         st.divider()
 
@@ -1445,6 +1692,11 @@ with tab_analytics:
 
             # Tabla comparativa de métricas
             df_subs_display = df_subs_st.copy()
+            _total_min_subs = df_subs_display["minutos_visionados"].sum()
+            df_subs_display["pct_horas"] = (
+                (df_subs_display["minutos_visionados"] / _total_min_subs * 100).round(1)
+                if _total_min_subs > 0 else 0.0
+            )
             df_subs_display["horas_visionadas"] = (
                 df_subs_display["minutos_visionados"] // 60
             ).astype(str) + "h " + (
@@ -1454,9 +1706,17 @@ with tab_analytics:
                 lambda s: f"{int(s)//60}m {int(s)%60:02d}s"
             )
             st.dataframe(
-                df_subs_display[["estado", "vistas", "porcentaje", "horas_visionadas", "duración_media"]]
-                .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%"}),
+                df_subs_display[["estado", "vistas", "porcentaje", "horas_visionadas", "pct_horas", "duración_media"]]
+                .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%", "pct_horas": "{:.1f}%"}),
                 hide_index=True, width="stretch",
+                column_config={
+                    "estado":           st.column_config.TextColumn("Estado"),
+                    "vistas":           st.column_config.NumberColumn("Vistas"),
+                    "porcentaje":       st.column_config.NumberColumn("% Vistas"),
+                    "horas_visionadas": st.column_config.TextColumn("Horas"),
+                    "pct_horas":        st.column_config.NumberColumn("% Horas"),
+                    "duración_media":   st.column_config.TextColumn("Dur. media"),
+                },
             )
         else:
             st.caption("Sin datos de estado de suscripción.")
@@ -1500,11 +1760,18 @@ with tab_analytics:
                     )
                     st.altair_chart(ch_dev_h, width="stretch")
             with col_d2:
+                _total_h_dev = df_devices["horas_visionadas"].sum()
+                _df_dev_disp = df_devices.copy()
+                _df_dev_disp["pct_horas"] = (
+                    (_df_dev_disp["horas_visionadas"] / _total_h_dev * 100).round(1)
+                    if _total_h_dev > 0 else 0.0
+                )
                 st.dataframe(
-                    df_devices.style.format({
+                    _df_dev_disp.style.format({
                         "vistas":           "{:,}",
                         "porcentaje":       "{:.1f}%",
                         "horas_visionadas": "{:.1f}h",
+                        "pct_horas":        "{:.1f}%",
                     }),
                     hide_index=True, width="stretch",
                     column_config={
@@ -1512,6 +1779,7 @@ with tab_analytics:
                         "vistas":           st.column_config.NumberColumn("Vistas"),
                         "porcentaje":       st.column_config.NumberColumn("% Vistas"),
                         "horas_visionadas": st.column_config.NumberColumn("Horas"),
+                        "pct_horas":        st.column_config.NumberColumn("% Horas"),
                     },
                 )
                 mobile = df_devices[df_devices["dispositivo"] == "Móvil"]
@@ -1573,15 +1841,27 @@ with tab_analytics:
                     )
                     st.altair_chart(ch_geo_h + h_text, width="stretch")
             with col_g2:
+                _total_h_geo = df_countries["horas_visionadas"].sum()
+                _df_geo_disp = df_countries.copy()
+                _df_geo_disp["pct_horas"] = (
+                    (_df_geo_disp["horas_visionadas"] / _total_h_geo * 100).round(1)
+                    if _total_h_geo > 0 else 0.0
+                )
                 st.dataframe(
-                    df_countries[["país", "vistas", "porcentaje", "horas_visionadas"]]
-                    .style.format({"vistas": "{:,}", "porcentaje": "{:.1f}%", "horas_visionadas": "{:.1f}h"}),
+                    _df_geo_disp[["país", "vistas", "porcentaje", "horas_visionadas", "pct_horas"]]
+                    .style.format({
+                        "vistas":           "{:,}",
+                        "porcentaje":       "{:.1f}%",
+                        "horas_visionadas": "{:.1f}h",
+                        "pct_horas":        "{:.1f}%",
+                    }),
                     hide_index=True, width="stretch",
                     column_config={
                         "país":             st.column_config.TextColumn("País"),
                         "vistas":           st.column_config.NumberColumn("Vistas"),
                         "porcentaje":       st.column_config.NumberColumn("% Vistas"),
                         "horas_visionadas": st.column_config.NumberColumn("Horas"),
+                        "pct_horas":        st.column_config.NumberColumn("% Horas"),
                     },
                 )
         else:
@@ -1626,13 +1906,105 @@ with tab_analytics:
 
         st.divider()
 
+        # ── 6. Monetización ────────────────────────────────────────────────────
+        st.markdown("### 💰 Monetización (YouTube)")
+        st.caption("Valores en USD estimados por YouTube. Solo disponible si el canal está en el **YouTube Partner Program**.")
+
+        with st.spinner("Cargando datos de monetización..."):
+            df_mon, prev_mon = get_monetization_overview(yt_periodo, yt_granularity)
+
+        if df_mon is not None and not df_mon.empty:
+            _CM = "#10B981"
+            mon_tot = df_mon["ingresos_anuncios"].sum() if "ingresos_anuncios" in df_mon.columns else 0.0
+            mon_imp = int(df_mon["impresiones"].sum()) if "impresiones" in df_mon.columns else 0
+            mon_cpm = float(df_mon["cpm"].mean()) if "cpm" in df_mon.columns else 0.0
+            mon_play= int(df_mon["reproducciones_monetizadas"].sum()) if "reproducciones_monetizadas" in df_mon.columns else 0
+
+            _pm = prev_mon or {}
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("💵 Ingresos estimados",    f"${mon_tot:.4f}",  delta=_delta_str(mon_tot,  _pm.get("ingresos_anuncios")))
+            col_m2.metric("📢 Impresiones de anuncios",f"{mon_imp:,}",    delta=_delta_str(mon_imp,  _pm.get("impresiones")))
+            col_m3.metric("📊 CPM medio",              f"${mon_cpm:.4f}", delta=_delta_str(mon_cpm,  _pm.get("cpm")))
+            col_m4.metric("▶ Reproducciones monetizadas", f"{mon_play:,}",delta=_delta_str(mon_play, _pm.get("reproducciones_monetizadas")))
+
+            mon_tab_ing, mon_tab_cpm = st.tabs(["Ingresos", "CPM"])
+            with mon_tab_ing:
+                if "fecha" in df_mon.columns:
+                    ch_ing = (
+                        alt.Chart(df_mon)
+                        .mark_area(color=_CM, opacity=0.3, line={"color": _CM})
+                        .encode(
+                            x=alt.X("fecha:O", title=""),
+                            y=alt.Y("ingresos_anuncios:Q", title="USD"),
+                            tooltip=["fecha", "ingresos_anuncios", "impresiones"],
+                        )
+                        .properties(height=220)
+                    )
+                    st.altair_chart(ch_ing, width="stretch")
+            with mon_tab_cpm:
+                if "fecha" in df_mon.columns and "cpm" in df_mon.columns:
+                    df_mon_melt = df_mon[["fecha","cpm","cpm_por_reproduccion"]].melt(
+                        id_vars="fecha", var_name="métrica", value_name="valor"
+                    )
+                    ch_cpm = (
+                        alt.Chart(df_mon_melt)
+                        .mark_line()
+                        .encode(
+                            x=alt.X("fecha:O", title=""),
+                            y=alt.Y("valor:Q", title="USD"),
+                            color=alt.Color("métrica:N", legend=alt.Legend(title="")),
+                            tooltip=["fecha", "métrica", "valor"],
+                        )
+                        .properties(height=220)
+                    )
+                    st.altair_chart(ch_cpm, width="stretch")
+
+            st.caption("El desglose de ingresos por vídeo no está disponible en la YouTube Analytics API v2.")
+        else:
+            st.warning(
+                "No se pudieron cargar datos de monetización. "
+                "El canal puede no estar en el YouTube Partner Program, "
+                "o el token no incluye el scope monetario — **desconecta y vuelve a conectar** para renovarlo."
+            )
+            if _am.last_error:
+                st.code(_am.last_error)
+
+        st.divider()
+
     # ── TikTok ─────────────────────────────────────────────────────────────────
     st.subheader("🎵 TikTok Analytics")
-    st.info(
-        "La TikTok for Business API requiere aprobación manual "
-        "(solicitud en developers.tiktok.com). "
-        "Una vez aprobada, añade el Access Token en **⚙️ Configuración** → TikTok."
+    st.warning(
+        "**La analítica de TikTok no está disponible a través de la API pública oficial.**"
     )
-    tiktok_token = config.get("tiktok", {}).get("access_token", "").strip()
-    if tiktok_token:
-        st.success("Token detectado — integración en desarrollo.")
+    with st.expander("Información"):
+        st.markdown(
+            """
+TikTok no expone métricas de rendimiento de vídeos ni datos de audiencia a través de su API pública.
+Todo lo que ves en **TikTok Studio** (vistas, tiempo de visualización, demografía, fuentes de tráfico, retención)
+es de uso interno y no está accesible mediante ningún endpoint oficial.
+
+**Lo que la API pública de TikTok sí permite:**
+
+| Dato | Disponible |
+|---|---|
+| Nombre de usuario y avatar | ✅ |
+| Nº de seguidores y vídeos | ✅ (requiere revisión manual de la app) |
+| Vistas por vídeo | ❌ |
+| Likes, comentarios, shares | ❌ |
+| Tiempo de visualización | ❌ |
+| Demografía de audiencia | ❌ |
+| Fuentes de tráfico | ❌ |
+| Distribución geográfica | ❌ |
+
+**¿Por qué?**
+
+TikTok eliminó el Display API en 2024 y los únicos productos disponibles para desarrolladores externos son:
+Login Kit, Share Kit, Content Posting API, Webhooks y Data Portability API (solo EEA/UK).
+Ninguno de ellos expone datos analíticos.
+
+Los datos completos de analytics solo están disponibles para cuentas con **acuerdo comercial directo con TikTok**
+(TikTok Business Center, grandes agencias y plataformas de gestión de redes sociales de pago).
+
+**Alternativas externas** (de pago): Sprout Social, Hootsuite, Phyllo, Metricool.
+            """
+        )

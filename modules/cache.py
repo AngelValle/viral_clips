@@ -38,6 +38,7 @@ class PipelineCache:
         "viral_detection.top_n_clips",
         "viral_detection.pre_buffer_seconds",
         "viral_detection.post_buffer_seconds",
+        "viral_detection.allow_multi_fragment",
     ]
     # Claves reales usadas en face_detector.py
     FACE_CFG_KEYS = [

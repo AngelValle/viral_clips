@@ -40,7 +40,6 @@ def extract_segment(
     ensamblar los fragmentos con jump cuts, recodificando con NVENC/libx264.
     El audio se recodifica a AAC en ambos casos para garantizar sincronía.
     """
-    from modules.gpu_utils import get_ffmpeg_hwaccel
     hw = get_ffmpeg_hwaccel()
 
     # Normalizar: si no hay fragments usar start/end como fragmento único
@@ -167,10 +166,10 @@ def _safe_ass_path(ass_path: Path) -> tuple:
     problematic = any(c in ass_str for c in (' ', '(', ')', '[', ']', ',', ';', "'", '"', '@'))
 
     if problematic:
-        # Copiar a carpeta temporal con nombre simple
+        # Copiar a carpeta temporal con nombre único por clip (evita colisiones en watch mode)
         tmp_dir  = Path(tempfile.gettempdir()) / "vc_subs"
         tmp_dir.mkdir(exist_ok=True)
-        safe_path = tmp_dir / "subtitle.ass"
+        safe_path = tmp_dir / f"sub_{ass_path.stem[:40]}.ass"
         shutil.copy2(str(ass_path), str(safe_path))
         logger.debug(f"ASS copiado a ruta segura: {safe_path}")
         return safe_path, True

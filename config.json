@@ -38,7 +38,8 @@
     ],
     "skip_intro_sec": 28,
     "skip_outro_sec": 28,
-    "min_fragment_dur": 1.5
+    "min_fragment_dur": 1.5,
+    "allow_multi_fragment": true
   },
   "face_detection": {
     "enabled": true,
@@ -62,23 +63,9 @@
     "face_min_size_ratio": 0.2
   },
   "censorship": {
-    "mode": "tiktok",
+    "mode": "alto",
     "custom_words": [],
-    "beep_frequency_hz": 1000,
-    "profiles": {
-      "tiktok": {
-        "strictness": "high"
-      },
-      "youtube": {
-        "strictness": "medium"
-      },
-      "instagram": {
-        "strictness": "high"
-      },
-      "twitch": {
-        "strictness": "low"
-      }
-    }
+    "beep_frequency_hz": 1000
   },
   "subtitles": {
     "enabled": true,
@@ -131,6 +118,9 @@
     ],
     "gameplay_x_offset": -200,
     "name_top_h_ratio": 0.1,
+    "neon_effect": "neon",
+    "neon_text_color_bgr": [255, 255, 255],
+    "neon_font_size_ratio": 0.65,
     "neon_sweep_speed": 0.6,
     "gameplay_x_offset_driving": -150,
     "driving_hud_min_components": 6,

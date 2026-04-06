@@ -62,10 +62,12 @@ def _find_font(font_name: str) -> Optional[str]:
 
 
 def _build_static_layers(
-    text: str, width: int, height: int, font: Any, neon_rgb: Tuple[int, int, int]
+    text: str, width: int, height: int, font: Any, neon_rgb: Tuple[int, int, int],
+    text_rgb: Optional[Tuple[int, int, int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     from PIL import Image, ImageDraw, ImageFilter
     nr, ng, nb = neon_rgb
+    tr, tg, tb = text_rgb if text_rgb else neon_rgb
     probe = ImageDraw.Draw(Image.new("RGBA", (width, height)))
     bbox  = probe.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -80,7 +82,7 @@ def _build_static_layers(
     d = ImageDraw.Draw(fill_img)
     for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
         d.text((tx + dx, ty + dy), text, font=font, fill=(0, 0, 0, 60))
-    d.text((tx, ty), text, font=font, fill=(nr, ng, nb, 255))
+    d.text((tx, ty), text, font=font, fill=(tr, tg, tb, 255))
 
     stroke_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     ImageDraw.Draw(stroke_img).text((tx, ty), text, font=font, fill=(0, 0, 0, 0), stroke_width=2, stroke_fill=(255, 255, 255, 255))
@@ -120,13 +122,17 @@ def generate_neon_overlay(
     sweep_speed = layout.get("neon_sweep_speed", 0.6)
     font_name   = config.get("subtitles", {}).get("font_name", "Showcard Gothic")
     font_size   = max(12, int(height * layout.get("neon_font_size_ratio", 0.65)))
-    bgr         = layout.get("webcam_name_color_bgr", [255, 50, 255])
+    bgr_fx      = layout.get("webcam_name_color_bgr", [255, 50, 255])
+    bgr_text    = layout.get("neon_text_color_bgr", bgr_fx)  # default = mismo color que el efecto
+
+    neon_rgb = (int(bgr_fx[2]),   int(bgr_fx[1]),   int(bgr_fx[0]))
+    text_rgb = (int(bgr_text[2]), int(bgr_text[1]), int(bgr_text[0]))
 
     font_path    = _find_font(font_name)
     font         = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
     cycle_frames = max(10, int(round(fps / sweep_speed)))
     fill_arr, stroke_mask = _build_static_layers(
-        text, width, height, font, (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+        text, width, height, font, neon_rgb, text_rgb
     )
 
     with tempfile.TemporaryDirectory() as td:
@@ -151,44 +157,132 @@ def generate_neon_overlay(
     return output_path
 
 
-# ── Caché de MOV neón ─────────────────────────────────────────────────────────
+# ── Helpers para efectos estáticos ───────────────────────────────────────────
 
-def _neon_mov_cached(
+def _save_as_single_frame_mov(img: Any, fps: int, output_path: Path) -> None:
+    """Envuelve una imagen PIL RGBA en un MOV de un solo frame (compatible con -stream_loop -1)."""
+    with tempfile.TemporaryDirectory() as td:
+        frame_path = Path(td) / "f0000.png"
+        img.save(str(frame_path))
+        subprocess.run([
+            "ffmpeg", "-y", "-framerate", str(fps), "-i", str(frame_path),
+            "-vcodec", "png", "-pix_fmt", "rgba", str(output_path),
+        ], capture_output=True, timeout=30)
+
+
+def _generate_solid_overlay(
+    text: str, width: int, height: int, config: dict, fps: int, output_path: Path
+) -> Path:
+    """Overlay estático: texto plano con outline negro para legibilidad."""
+    from PIL import Image, ImageDraw, ImageFont
+    layout    = config.get("layout", {})
+    font_name = config.get("subtitles", {}).get("font_name", "Showcard Gothic")
+    font_size = max(12, int(height * layout.get("neon_font_size_ratio", 0.65)))
+    bgr_text  = layout.get("neon_text_color_bgr", [255, 255, 255])
+    r, g, b   = bgr_text[2], bgr_text[1], bgr_text[0]
+
+    font_path = _find_font(font_name)
+    font      = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
+
+    img  = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx, ty = (width - tw) // 2, (height - th) // 2
+
+    # Outline negro grueso para contraste en cualquier fondo
+    for dx, dy in [(-2,-2),(2,-2),(-2,2),(2,2),(-2,0),(2,0),(0,-2),(0,2)]:
+        draw.text((tx + dx, ty + dy), text, font=font, fill=(0, 0, 0, 180))
+    draw.text((tx, ty), text, font=font, fill=(r, g, b, 255))
+
+    _save_as_single_frame_mov(img, fps, output_path)
+    return output_path
+
+
+def _generate_shadow_overlay(
+    text: str, width: int, height: int, config: dict, fps: int, output_path: Path
+) -> Path:
+    """Overlay estático: texto con sombra difuminada del color de efecto."""
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    layout    = config.get("layout", {})
+    font_name = config.get("subtitles", {}).get("font_name", "Showcard Gothic")
+    font_size = max(12, int(height * layout.get("neon_font_size_ratio", 0.65)))
+    bgr_text  = layout.get("neon_text_color_bgr", [255, 255, 255])
+    bgr_fx    = layout.get("webcam_name_color_bgr", [0, 0, 0])
+    rt, gt, bt = bgr_text[2], bgr_text[1], bgr_text[0]
+    rs, gs, bs = bgr_fx[2],   bgr_fx[1],   bgr_fx[0]
+
+    font_path = _find_font(font_name)
+    font      = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
+
+    img  = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx, ty = (width - tw) // 2, (height - th) // 2
+
+    # Capa de sombra difuminada
+    shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).text((tx + 5, ty + 5), text, font=font, fill=(rs, gs, bs, 200))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=8))
+    img    = Image.alpha_composite(img, shadow)
+
+    # Texto principal con outline fino
+    draw2 = ImageDraw.Draw(img)
+    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        draw2.text((tx + dx, ty + dy), text, font=font, fill=(0, 0, 0, 200))
+    draw2.text((tx, ty), text, font=font, fill=(rt, gt, bt, 255))
+
+    _save_as_single_frame_mov(img, fps, output_path)
+    return output_path
+
+
+# ── Caché de overlay del nombre ───────────────────────────────────────────────
+
+def _name_overlay_cached(
     text: str, width: int, height: int,
     fps: int, config: dict,
     cache_dir: Path,
     variant: str,          # "cam" o "top"
 ) -> Path:
     """
-    Devuelve la ruta del MOV neón, generándolo solo si no existe
+    Devuelve la ruta del overlay del nombre, generándolo solo si no existe
     o si los parámetros han cambiado.
 
-    Clave de caché: nombre + dimensiones + fps + pulse_speed + color + fuente.
+    Clave de caché incluye: efecto + colores + fuente + dimensiones + fps.
     """
     import hashlib, json as _json
 
-    layout     = config.get("layout", {})
-    font_name  = config.get("subtitles", {}).get("font_name", "Showcard Gothic")
-    key_data   = {
-        "text":        text,
-        "width":       width,
-        "height":      height,
-        "fps":         fps,
-        "pulse_speed": layout.get("neon_pulse_speed", 1.5),
-        "color_bgr":   layout.get("webcam_name_color_bgr", [255, 50, 255]),
-        "font":        font_name,
-        "font_ratio":  layout.get("neon_font_size_ratio", 0.65),
+    layout    = config.get("layout", {})
+    effect    = layout.get("neon_effect", "neon")
+    font_name = config.get("subtitles", {}).get("font_name", "Showcard Gothic")
+    key_data  = {
+        "text":           text,
+        "width":          width,
+        "height":         height,
+        "fps":            fps,
+        "effect":         effect,
+        "sweep_speed":    layout.get("neon_sweep_speed", 0.6),
+        "color_bgr":      layout.get("webcam_name_color_bgr", [255, 50, 255]),
+        "text_color_bgr": layout.get("neon_text_color_bgr"),
+        "font":           font_name,
+        "font_ratio":     layout.get("neon_font_size_ratio", 0.65),
     }
     key_hash  = hashlib.md5(_json.dumps(key_data, sort_keys=True).encode()).hexdigest()[:12]
-    mov_path  = cache_dir / f"neon_{variant}_{key_hash}.mov"
+    out_path  = cache_dir / f"overlay_{variant}_{key_hash}.mov"
 
-    if mov_path.exists() and mov_path.stat().st_size > 0:
-        logger.info(f"Overlay neón: {mov_path.name} ↩ caché")
-        return mov_path
+    if out_path.exists() and out_path.stat().st_size > 0:
+        logger.info(f"Overlay nombre ({effect}): {out_path.name} ↩ caché")
+        return out_path
 
-    # Generar y guardar en caché
-    generate_neon_overlay(text, width, height, fps, mov_path, config)
-    return mov_path
+    if effect == "neon":
+        generate_neon_overlay(text, width, height, fps, out_path, config)
+    elif effect == "solid":
+        _generate_solid_overlay(text, width, height, config, fps, out_path)
+    elif effect == "shadow":
+        _generate_shadow_overlay(text, width, height, config, fps, out_path)
+    # "ninguno" nunca llega aquí (filtrado en compose_dynamic)
+    return out_path
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -408,17 +502,18 @@ def compose_dynamic(
         neon_cache_dir = Path(config["paths"].get("cache_dir", "videos/cache")) / "neon"
         neon_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if streamer_name:
+        effect = layout.get("neon_effect", "neon")
+        if streamer_name and effect != "ninguno":
             if intervals:
                 name_h   = _even(int(oh * layout.get("webcam_name_h_ratio", 0.10)))
-                name_mov = _neon_mov_cached(streamer_name, ow, name_h, fps, config,
-                                            neon_cache_dir, "cam")
+                name_mov = _name_overlay_cached(streamer_name, ow, name_h, fps, config,
+                                                neon_cache_dir, "cam")
             else:
                 name_h   = _even(int(res_h * layout.get("name_top_h_ratio", 0.06)))
-                name_mov = _neon_mov_cached(streamer_name, res_w, name_h, fps, config,
-                                            neon_cache_dir, "top")
+                name_mov = _name_overlay_cached(streamer_name, res_w, name_h, fps, config,
+                                                neon_cache_dir, "top")
         else:
-            # Sin nombre: MOV vacío 2x2 de 1 frame (también cacheado)
+            # Sin nombre o efecto "ninguno": MOV vacío 2x2 de 1 frame (cacheado)
             name_mov = neon_cache_dir / "neon_empty.mov"
             if not name_mov.exists():
                 subprocess.run([

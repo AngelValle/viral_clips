@@ -388,6 +388,8 @@ El archivo `config.json` controla todos los parámetros del pipeline.
   "post_buffer_seconds": 2,
   "skip_intro_sec": 28,
   "skip_outro_sec": 28,
+  "min_fragment_dur": 1.5,
+  "allow_multi_fragment": true,
   "viral_keywords": ["increíble", "vamos", "brutal", ...]
 }
 ```
@@ -398,7 +400,9 @@ El archivo `config.json` controla todos los parámetros del pipeline.
 | `top_n_clips` | Máximo de clips a extraer por stream (`999` = sin límite) |
 | `pre/post_buffer_seconds` | Segundos de margen antes/después de cada momento viral |
 | `skip_intro/outro_sec` | Segundos a ignorar al principio y final del stream |
-| `viral_keywords` | Palabras que suman puntuación en el fallback por señales |
+| `min_fragment_dur` | Duración mínima en segundos de cada fragmento individual para ser considerado válido |
+| `allow_multi_fragment` | `true` (por defecto): los clips pueden formarse por varios fragmentos discontinuos concatenados con jump cuts. `false`: cada clip es un único segmento continuo — los fragmentos propuestos por Gemini se colapsan al span completo (primer inicio → último fin), incluyendo los huecos entre ellos |
+| `viral_keywords` | Palabras que suman puntuación en el fallback por señales de audio |
 
 ### `face_detection`
 
@@ -655,7 +659,7 @@ El pipeline se divide en 8 pasos controlables con `--max-step`. Cada paso usa la
 - Detecta menciones de `viral_keywords` en la transcripción
 - Pondera señales: `audio_peak × 0.45 + speech_speed × 0.35 + keywords × 0.20`
 
-Los segmentos pueden ser **multi-fragmento**: varios rangos de tiempo discontinuos que se concatenan en un solo clip. Los fragmentos dentro de un mismo clip se ordenan por tiempo y no pueden solaparse entre sí (se descarta el solapante posterior).
+Los segmentos pueden ser **multi-fragmento** (si `viral_detection.allow_multi_fragment = true`): varios rangos de tiempo discontinuos que se concatenan con jump cuts en un solo clip. Los fragmentos dentro de un mismo clip se ordenan por tiempo y no pueden solaparse entre sí (se descarta el solapante posterior). Si `allow_multi_fragment = false`, los fragmentos propuestos por Gemini se colapsan automáticamente al span continuo completo (desde el inicio del primer fragmento hasta el fin del último, incluyendo los huecos), tanto en la detección como en la extracción.
 
 Resultado cacheado en `segments.json`.
 
@@ -736,7 +740,7 @@ Resultado cacheado en `segments.json`.
 | `cache.py` | Caché por carpeta/vídeo con fingerprint MD5 de config para invalidación automática; almacena transcripción, segmentos y datos faciales |
 | `gpu_utils.py` | Detecta GPU NVIDIA, selecciona encoder (`h264_nvenc` o `libx264`) y decoder (`cuda` o software), expone resumen de hardware |
 | `publisher.py` | Publicación a YouTube con OAuth2 + `googleapiclient`; publicación a TikTok con Playwright; soporte de programación horaria |
-| `analytics.py` | Dashboard de analítica: YouTube Analytics API v2 + Data API v3. Multi-cuenta OAuth2 (`client_secrets_*.json`). KPIs, tendencias, top vídeos, fuentes de tráfico, dispositivos, geografía, demografía |
+| `analytics.py` | Dashboard de analítica: YouTube Analytics API v2 + Data API v3. Multi-cuenta OAuth2 (`client_secrets_*.json`). KPIs, tendencias, top vídeos, fuentes de tráfico (orgánico vs pagado), promociones de YouTube Studio, dispositivos, geografía, demografía, monetización (YPP) |
 
 ---
 
@@ -792,7 +796,7 @@ Permite editar todos los parámetros del pipeline sin tocar `config.json` direct
 | **Streamer** | Nombre del streamer, nombre del juego, tipo de contenido |
 | **Módulos opcionales** | Detección de cámara/cara, subtítulos, detección de conducción, diarización de locutores |
 | **Whisper** | Modelo (`tiny` → `large-v3`), idioma, tipo de cómputo |
-| **Detección viral** | Duraciones mín/máx, buffers, intro/outro, nº máximo de clips, keywords virales |
+| **Detección viral** | Duraciones mín/máx, buffers, intro/outro, nº máximo de clips, **modo multi-fragmento** (toggle), keywords virales |
 | **Subtítulos** | Fuente, tamaño, outline, posición vertical, ancho máximo de línea, offset de sincronía |
 | **Censura** | Perfil activo (`tiktok`, `youtube`, `instagram`, `twitch`, `desactivado`), frecuencia del bip, palabras adicionales |
 | **IA — Gemini** | Modelo Gemini, toggle multimodal + intervalo de frames configurable (5–120 s, inline, tier gratuito) |
@@ -821,6 +825,16 @@ Cada cuenta tiene su propio token OAuth independiente:
 
 Desconectar solo borra el token de la cuenta activa, sin afectar a las demás.
 
+#### Scopes OAuth requeridos
+
+El token se genera automáticamente con los tres scopes al conectar por primera vez. Si el token existente no incluye el scope monetario, se solicita re-autenticación automáticamente.
+
+| Scope | Para qué sirve |
+|---|---|
+| `youtube.readonly` | Información del canal (suscriptores, vídeos, títulos) |
+| `yt-analytics.readonly` | Métricas de rendimiento (vistas, engagement, geografía, etc.) |
+| `yt-analytics-monetary.readonly` | Métricas de monetización (ingresos, CPM, reproducciones monetizadas) |
+
 #### Configuración inicial (una sola vez por cuenta)
 1. Crear credencial OAuth 2.0 tipo **Desktop app** en Google Cloud Console → descargar como `client_secrets_NombreCuenta.json`
 2. En *OAuth consent screen → Público → Usuarios de prueba*: añadir el email del canal
@@ -834,8 +848,9 @@ Desconectar solo borra el token de la cuenta activa, sin afectar a las demás.
 | **Cuenta** | Desplegable con todas las cuentas detectadas automáticamente |
 | **Tipo de contenido** | Todos / Shorts / Vídeos _(aplica solo a Top vídeos — limitación de la API)_ |
 | **Periodo** | 1 día · 7 días · 14 días · 28 días · 1 mes · 2 meses · 3 meses · 4 meses · 5 meses · 6 meses · Histórico |
+| **3–6 meses — granularidad** | Diario / Mensual (mismo selector que Histórico; la API exige fechas alineadas al primer día del mes para granularidad mensual — se ajustan automáticamente) |
 | **Histórico — rango personalizado** | Date pickers de inicio y fin (ajustados automáticamente al primer día del mes) |
-| **Histórico — granularidad** | Diario / Mensual (la API exige que inicio y fin sean primer día de mes para granularidad mensual) |
+| **Histórico — granularidad** | Diario / Mensual |
 
 #### Secciones del dashboard
 
@@ -844,17 +859,35 @@ Desconectar solo borra el token de la cuenta activa, sin afectar a las demás.
 | **Header de canal** | Nombre, suscriptores totales, vistas totales, nº de vídeos |
 | **KPIs (6 métricas)** | Vistas · Horas visionadas · Tasa de interacción % · Suscriptores netos · Shares · Duración media — con delta % vs periodo anterior |
 | **Tendencia temporal** | 4 tabs: Vistas (área+línea) · Engagement (área apilada likes/comentarios/shares) · Suscriptores (ganados vs perdidos) · Tiempo visionado |
-| **Mejor día para publicar** | Últimos 90 días agrupados por día de la semana: media de vistas y engagement rate. Recomendación automática |
+| **Mejor día para publicar** | Últimos 90 días agrupados por día de la semana. 3 gráficos: media de vistas · media de horas visionadas · engagement rate. Recomendación automática del mejor día en cada métrica. Los 7 días siempre visibles (relleno con 0 si no hay datos) |
 | **Top vídeos del periodo** | Hasta 200 vídeos con: Título · Vistas · Tasa interacción % · Duración media · Likes · Comentarios · Shares · Subs ganados. Barras de progreso visuales |
-| **Fuentes de tráfico** | Barras horizontales con % por fuente (Sugeridos, Búsqueda, Externo, etc.). Alerta si Vídeos sugeridos > 40% |
-| **Suscriptores vs no suscriptores** | Donut chart + tabla comparativa (vistas, horas visionadas, duración media). Indicador automático de alcance viral |
-| **Dispositivos** | 2 tabs: Vistas y Tiempo de visualización — donut chart por dispositivo (Móvil / PC / Tablet / TV / Consola). Tabla con Vistas, % y Horas. Alerta si móvil > 70% confirma formato 9:16 |
-| **Distribución geográfica** | 2 tabs: Vistas y Tiempo de visualización — top 15 países con barras horizontales y %. Tabla con Vistas, % Vistas y Horas |
-| **Demografía de audiencia** | Barras agrupadas por edad y género (requiere periodo con datos suficientes). Segmento dominante destacado |
-| **TikTok Analytics** | Placeholder — pendiente de aprobación de la TikTok for Business API |
+| **Fuentes de tráfico** | KPIs orgánico vs pagado · Barras por fuente con % de vistas · Tabla con Vistas, % Vistas, Horas y % Horas · Alerta si Vídeos sugeridos > 40% · Input de presupuesto → CPV estimado (si hay tráfico de promoción) |
+| **Promociones de YouTube Studio** | Vistas totales del canal procedentes de `ADVERTISING` (promociones internas de YouTube Studio) y horas visionadas. Input de presupuesto total para calcular CPV, vistas por euro y coste por hora. Nota: la API solo expone el total del canal, no el desglose por vídeo — consultar YouTube Studio → Contenido → Promociones |
+| **Suscriptores vs no suscriptores** | Donut chart + tabla comparativa (vistas, % Vistas, horas visionadas, % Horas, duración media). Indicador automático de alcance viral |
+| **Dispositivos** | 2 tabs: Vistas y Tiempo de visualización — donut chart por dispositivo (Móvil / PC / Tablet / TV / Consola). Tabla con Vistas, % Vistas, Horas y % Horas. Alerta si móvil > 70% confirma formato 9:16 |
+| **Distribución geográfica** | 2 tabs: Vistas y Tiempo de visualización — top 10 países. Tabla con Vistas, % Vistas, Horas y % Horas |
+| **Demografía de audiencia** | Barras agrupadas por edad y género. Segmento dominante destacado |
+| **Monetización (YouTube)** | Solo canales en el YouTube Partner Program. KPIs: Ingresos USD, Impresiones de anuncios, CPM medio, Reproducciones monetizadas — con delta vs periodo anterior. Gráficos de ingresos y CPM por periodo. El desglose por vídeo no está disponible en la API |
+| **TikTok Analytics** | No disponible. La API pública de TikTok (Login Kit, Share Kit, Content Posting API, Webhooks, Data Portability API) no expone métricas de rendimiento de vídeos ni datos de audiencia. Solo disponible con acuerdo comercial directo con TikTok |
+
+#### Promociones de YouTube Studio
+
+Las promociones creadas desde **YouTube Studio → Contenido → Promociones** aparecen en YouTube Analytics API como tráfico de tipo `ADVERTISING`. La sección muestra el total del canal para el periodo seleccionado:
+
+- Vistas totales procedentes de promociones
+- Horas visionadas de pago
+- Calculadora de eficiencia: introducir el presupuesto total invertido para obtener CPV (coste por vista), vistas por euro y coste por hora visionada
+
+> **Limitación de la API**: YouTube Analytics v2 no permite identificar qué vídeos específicos recibieron tráfico de promociones — solo expone el agregado del canal. Para ver los vídeos promocionados individualmente, consultar **YouTube Studio → Contenido → Promociones**. Las métricas de coste, presupuesto y fechas de campaña tampoco están disponibles en la API.
+
+#### Monetización
+
+Requiere canal en el **YouTube Partner Program (YPP)**. Si el canal no está monetizado, la sección muestra un aviso. Los valores se expresan en USD (estimación de YouTube).
+
+Si el token existente no incluye el scope `yt-analytics-monetary.readonly`, la app lo detecta automáticamente y solicita re-autenticación al conectar.
 
 #### Métricas no disponibles en la API pública
-Las siguientes métricas **solo** están disponibles en YouTube Studio interno y no se exponen en la API Analytics v2: impresiones, CTR de miniaturas, curva de retención por segundo, ingresos/RPM.
+Las siguientes métricas **solo** están disponibles en YouTube Studio interno y no se exponen en la API Analytics v2: impresiones de miniaturas, CTR de miniaturas, curva de retención por segundo, ingresos exactos/RPM, presupuesto y fechas de campañas de promoción.
 
 ---
 

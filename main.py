@@ -284,12 +284,23 @@ def process_video(video_path: Path, config: dict, use_cache: bool = True, max_st
             tmp = Path(tmp_dir)
 
             # ── PASO 3: Extracción del segmento crudo ─────────────────────────
-            if max_step < 3:
-                continue
+            # Respetar allow_multi_fragment también para segmentos editados en la UI
+            _seg_frags = segment.get("fragments") or []
+            if not config.get("viral_detection", {}).get("allow_multi_fragment", True) \
+                    and len(_seg_frags) > 1:
+                _cs = _seg_frags[0]["start"]
+                _ce = _seg_frags[-1]["end"]
+                logger.info(
+                    f"allow_multi_fragment=false → clip continuo {_cs:.1f}s–{_ce:.1f}s "
+                    f"(colapsados {len(_seg_frags)} fragmentos)"
+                )
+                _seg_frags = [{"start": _cs, "end": _ce}]
+
             logger.info("PASO 3/8 — Extrayendo segmento crudo")
+
             raw_clip = tmp / "raw.mp4"
             extract_segment(video_path, segment["start"], segment["end"],
-                            raw_clip, fragments=segment.get("fragments"))
+                            raw_clip, fragments=_seg_frags or None)
 
             # ── PASO 4: Detección facial ──────────────────────────────────────
             if max_step < 4:
@@ -334,9 +345,8 @@ def process_video(video_path: Path, config: dict, use_cache: bool = True, max_st
             logger.info("PASO 6/8 — Censura, subtítulos y render final")
             clip_words = words_in_range(all_words, segment["start"], segment["end"])
 
-            fragments = segment.get("fragments")
-            if fragments and len(fragments) > 1:
-                clip_words_rel = remap_words_to_fragments(clip_words, fragments)
+            if _seg_frags and len(_seg_frags) > 1:
+                clip_words_rel = remap_words_to_fragments(clip_words, _seg_frags)
             else:
                 offset = segment["start"]
                 clip_words_rel = [

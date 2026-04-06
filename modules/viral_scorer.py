@@ -85,7 +85,10 @@ def _call_gemini(
         logger.warning("GEMINI_API_KEY no encontrada en el entorno")
         return None
 
-    model = config.get("gemini", {}).get("model", "gemini-3.1-flash-lite-preview")
+    cfg_gemini  = config.get("gemini", {})
+    model       = cfg_gemini.get("model", "gemini-3.1-flash-lite-preview")
+    max_retries = cfg_gemini.get("max_retries", max_retries)
+    retry_wait  = cfg_gemini.get("retry_wait_sec", retry_wait)
 
     from google import genai
     from google.genai import types as genai_types
@@ -105,7 +108,7 @@ def _call_gemini(
     else:
         contents = [prompt]
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, max_retries + 1):  # cliente creado una sola vez antes del bucle
         try:
             response = client.models.generate_content(
                 model=model,
@@ -332,6 +335,22 @@ def _parse_gemini_segments(response: str, words: List[Dict],
             valid_frags = trimmed
             total_dur   = sum(e - s for s, e in valid_frags)
 
+        # Si multi-fragmento deshabilitado, colapsar al span continuo completo
+        if not config.get("viral_detection", {}).get("allow_multi_fragment", True) \
+                and len(valid_frags) > 1:
+            cs   = valid_frags[0][0]
+            ce   = valid_frags[-1][1]
+            span = ce - cs
+            if span > max_dur:
+                ce   = round(cs + max_dur, 2)
+                span = max_dur
+            logger.debug(
+                f"allow_multi_fragment=false → colapsando {len(valid_frags)} frags "
+                f"a span continuo {cs:.1f}-{ce:.1f}s ({span:.1f}s)"
+            )
+            valid_frags = [(cs, ce)]
+            total_dur   = span
+
         # Registrar fragmentos como usados
         for fs, fe in valid_frags:
             used.append((fs, fe))
@@ -358,7 +377,7 @@ def _parse_gemini_segments(response: str, words: List[Dict],
 # Usado solo si no hay API key de Gemini
 
 def _extract_audio_array(video_path: Path, sample_rate: int = 16000) -> np.ndarray:
-    import tempfile, os, wave
+    import wave
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
     try:

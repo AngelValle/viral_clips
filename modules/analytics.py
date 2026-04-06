@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 _SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
+    "https://www.googleapis.com/auth/yt-analytics-monetary.readonly",
 ]
 _active_account: str = ""
 
@@ -74,6 +75,24 @@ _RENAME = {
     "comments":                  "comentarios",
 }
 
+_METRICS_MONETARY = [
+    "estimatedAdRevenue",
+    "adImpressions",
+    "cpm",
+    "monetizedPlaybacks",
+    "playbackBasedCpm",
+]
+
+_RENAME_MONETARY = {
+    "day":                  "fecha",
+    "month":                "fecha",
+    "estimatedAdRevenue":   "ingresos_anuncios",
+    "adImpressions":        "impresiones",
+    "cpm":                  "cpm",
+    "monetizedPlaybacks":   "reproducciones_monetizadas",
+    "playbackBasedCpm":     "cpm_por_reproduccion",
+}
+
 
 # ── Autenticación ──────────────────────────────────────────────────────────────
 
@@ -104,6 +123,15 @@ def _get_yt_credentials():
     if token_file.exists():
         with open(token_file, "rb") as f:
             credentials = pickle.load(f)
+
+    # Si el token existe pero le falta el scope monetario, forzar re-auth
+    _MONETARY_SCOPE = "https://www.googleapis.com/auth/yt-analytics-monetary.readonly"
+    if credentials is not None:
+        granted = set(getattr(credentials, "scopes", None) or [])
+        if granted and _MONETARY_SCOPE not in granted:
+            logger.info("Token sin scope monetario — forzando re-autenticación.")
+            token_file.unlink(missing_ok=True)
+            credentials = None
 
     if credentials and credentials.valid:
         return credentials
@@ -243,18 +271,22 @@ def _query_report(
     video_type: str = "Todos",
     sort: str = None,
     max_results: int = None,
+    raw_filter: str = None,
 ) -> Optional[pd.DataFrame]:
     """Wrapper central sobre youtubeAnalytics v2 reports.query().
 
+    raw_filter: filtro literal (p.ej. "insightTrafficSourceType==YT_ADVERTISING").
+    Si se proporciona, tiene prioridad sobre el filtro videoType.
     NOTA: el filtro videoType solo es válido con dimensions='video'.
-    Para day/month se ignora (limitación de la API de YouTube Analytics).
     """
     global last_error
-    # videoType filter solo funciona con dimensions="video"
-    vt_filter = None
-    if dimensions == "video":
+    if raw_filter:
+        vt_filter = raw_filter
+    elif dimensions == "video":
         vt_filter = {"Shorts": "videoType==shortVideoType",
                      "Vídeos": "videoType==regularVideoType"}.get(video_type)
+    else:
+        vt_filter = None
     try:
         from googleapiclient.discovery import build
         svc = build("youtubeAnalytics", "v2", credentials=creds)
@@ -359,6 +391,11 @@ def get_analytics_with_delta(
         dim = granularity
     start, end = date_range(period)
 
+    # La API exige que startDate y endDate sean primer día de mes con dimensions=month
+    if dim == "month":
+        start = str(date.fromisoformat(start).replace(day=1))
+        end   = str(date.fromisoformat(end).replace(day=1))
+
     df = _query_report(creds, start, end, dim, _METRICS_DAILY,
                        video_type, sort=dim)
     if df is None:
@@ -427,15 +464,20 @@ def get_day_of_week_stats(video_type: str = "Todos") -> Optional[pd.DataFrame]:
     agg = (
         df.groupby("dia_num")
         .agg(
-            vistas_media    =("views",        "mean"),
-            engagement_media=("_engagement",  "mean"),
-            n_dias          =("views",        "count"),
+            vistas_media    =("views",                   "mean"),
+            min_media       =("estimatedMinutesWatched", "mean"),
+            engagement_media=("_engagement",             "mean"),
+            n_dias          =("views",                   "count"),
         )
         .reset_index()
     )
-    agg["dia_semana"] = agg["dia_num"].map(_DIAS)
-    agg["vistas_media"]     = agg["vistas_media"].round(0).astype(int)
-    agg["engagement_media"] = agg["engagement_media"].fillna(0).round(2)
+    # Garantizar los 7 días aunque alguno no tenga datos en el periodo
+    agg = agg.set_index("dia_num").reindex(range(7)).reset_index()
+    agg["dia_semana"]        = agg["dia_num"].map(_DIAS)
+    agg["vistas_media"]      = agg["vistas_media"].fillna(0).round(0).astype(int)
+    agg["horas_media"]       = (agg["min_media"].fillna(0) / 60).round(1)
+    agg["engagement_media"]  = agg["engagement_media"].fillna(0).round(2)
+    agg["n_dias"]            = agg["n_dias"].fillna(0).astype(int)
     return agg.sort_values("dia_num")
 
 
@@ -507,7 +549,7 @@ _TRAFFIC_LABELS = {
     "YT_OTHER_PAGE":      "Otra página de YouTube",
     "SUBSCRIBER":         "Feed de suscripciones",
     "END_SCREEN":         "Pantalla final",
-    "YT_ADVERTISING":     "Publicidad",
+    "ADVERTISING":        "Publicidad (promociones)",
     "SHORTS_FEED":        "Feed de Shorts",
     "HASHTAGS":           "Hashtags",
     "PRODUCT_PAGE":       "Página de producto",
@@ -517,22 +559,30 @@ _TRAFFIC_LABELS = {
 def get_traffic_sources(period: str) -> Optional[pd.DataFrame]:
     """
     Fuentes de tráfico del canal en el periodo dado.
-    Retorna DataFrame: {fuente, vistas, pct}
+    Retorna DataFrame: {fuente, fuente_raw, vistas, porcentaje, horas_visionadas}
     """
     creds = _get_yt_credentials()
     if not creds:
         return None
     start, end = date_range(period)
     df = _query_report(creds, start, end, "insightTrafficSourceType",
-                       ["views"], sort=None)
+                       ["views", "estimatedMinutesWatched"], sort=None)
     if df is None or df.empty:
         return df
-    df = df.rename(columns={"insightTrafficSourceType": "fuente_raw", "views": "vistas"})
-    df["fuente"] = df["fuente_raw"].map(lambda x: _TRAFFIC_LABELS.get(x, x))
-    df["vistas"] = df["vistas"].astype(int)
+    df = df.rename(columns={
+        "insightTrafficSourceType": "fuente_raw",
+        "views":                    "vistas",
+        "estimatedMinutesWatched":  "minutos_visionados",
+    })
+    df["fuente"]           = df["fuente_raw"].map(lambda x: _TRAFFIC_LABELS.get(x, x))
+    df["vistas"]           = df["vistas"].astype(int)
+    df["minutos_visionados"] = df["minutos_visionados"].astype(int)
+    df["horas_visionadas"] = (df["minutos_visionados"] / 60).round(1)
     total = df["vistas"].sum()
     df["porcentaje"] = ((df["vistas"] / total * 100).round(1) if total > 0 else 0.0).fillna(0)
-    return df[["fuente", "vistas", "porcentaje"]].sort_values("vistas", ascending=False)
+    return df[["fuente", "fuente_raw", "vistas", "porcentaje", "horas_visionadas"]].sort_values(
+        "vistas", ascending=False
+    )
 
 
 # ── Suscriptores vs no suscriptores ───────────────────────────────────────────
@@ -682,3 +732,53 @@ def get_demographics(period: str) -> Optional[pd.DataFrame]:
     return df[["edad", "genero", "porcentaje"]].sort_values(
         ["edad", "genero"]
     )
+
+
+# ── Monetización ───────────────────────────────────────────────────────────────
+
+def get_monetization_overview(
+    period: str, granularity: str = "auto"
+) -> tuple[Optional[pd.DataFrame], Optional[dict]]:
+    """
+    Ingresos, CPM e impresiones de anuncios en el periodo indicado.
+    Requiere scope yt-analytics-monetary.readonly y canal en YouTube Partner Program.
+    Retorna (df_current, prev_totals).
+    """
+    creds = _get_yt_credentials()
+    if not creds:
+        return None, None
+
+    is_hist = period in ("Histórico",) or period.startswith("custom:")
+    if granularity == "auto":
+        dim = "month" if is_hist else "day"
+    else:
+        dim = granularity
+
+    start, end = date_range(period)
+    if dim == "month":
+        start = str(date.fromisoformat(start).replace(day=1))
+        end   = str(date.fromisoformat(end).replace(day=1))
+
+    df = _query_report(creds, start, end, dim, _METRICS_MONETARY, sort=dim)
+    if df is None:
+        return None, None
+
+    df = df.rename(columns={k: v for k, v in _RENAME_MONETARY.items() if k in df.columns})
+
+    # Periodo anterior
+    prev_totals = None
+    prev_range  = _prev_date_range(period)
+    if prev_range:
+        df_prev = _query_report(creds, prev_range[0], prev_range[1], "day", _METRICS_MONETARY)
+        if df_prev is not None and not df_prev.empty:
+            prev_totals = {
+                "ingresos_anuncios":          float(df_prev.get("estimatedAdRevenue",  pd.Series([0])).sum()),
+                "impresiones":                int(df_prev.get("adImpressions",         pd.Series([0])).sum()),
+                "cpm":                        float(df_prev.get("cpm",                 pd.Series([0])).mean()),
+                "reproducciones_monetizadas": int(df_prev.get("monetizedPlaybacks",    pd.Series([0])).sum()),
+                "cpm_por_reproduccion":       float(df_prev.get("playbackBasedCpm",    pd.Series([0])).mean()),
+            }
+
+    return df, prev_totals
+
+

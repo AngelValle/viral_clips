@@ -3,7 +3,7 @@ censor.py
 Detecta palabras malsonantes en la transcripción y aplica:
   1. Pitido (beep 1kHz) sobre el audio en los timestamps de la palabra.
   2. Sustitución por asteriscos en los subtítulos.
-Soporta perfiles de strictness por red social.
+Modos disponibles: alto, medio, bajo, personalizado, desactivado.
 """
 
 import re
@@ -32,9 +32,9 @@ BASE_PROFANITY_EN = [
 ]
 
 STRICTNESS_PROFILES = {
-    "high":   BASE_PROFANITY_ES + BASE_PROFANITY_EN,
-    "medium": BASE_PROFANITY_ES,
-    "low":    ["mierda", "puta", "fuck", "shit"],
+    "alto":  BASE_PROFANITY_ES + BASE_PROFANITY_EN,
+    "medio": BASE_PROFANITY_ES,
+    "bajo":  ["mierda", "puta", "fuck", "shit"],
 }
 
 
@@ -46,20 +46,27 @@ def _load_wordlist(wordlist_path: Path) -> List[str]:
 
 
 def build_profanity_set(config: Dict[str, Any]) -> Set[str]:
-    """Construye el conjunto de palabras a censurar según perfil y config."""
-    mode      = config["censorship"]["mode"]
+    """Construye el conjunto de palabras a censurar según el modo configurado.
+
+    Modos:
+      alto        — todas las palabras ES + EN
+      medio       — solo palabras en español
+      bajo        — solo las blasfemias más graves (ES + EN)
+      personalizado — únicamente las custom_words del config (sin lista base)
+      desactivado — sin censura
+    """
+    mode         = config["censorship"]["mode"]
+    custom_words = set(w.lower() for w in config["censorship"].get("custom_words", []))
+    extra        = set(_load_wordlist(Path("assets/wordlists/custom.txt")))
+
     if mode == "desactivado":
         return set()
-    profile   = config["censorship"]["profiles"].get(mode, {})
-    strictness = profile.get("strictness", "medium")
 
-    words = set(STRICTNESS_PROFILES.get(strictness, []))
-    words.update(w.lower() for w in config["censorship"].get("custom_words", []))
+    if mode == "personalizado":
+        return custom_words | extra
 
-    # Cargar wordlist externa si existe
-    extra = _load_wordlist(Path("assets/wordlists/custom.txt"))
-    words.update(extra)
-
+    words = set(STRICTNESS_PROFILES.get(mode, STRICTNESS_PROFILES["medio"]))
+    words |= custom_words | extra
     return words
 
 

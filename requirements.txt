@@ -35,10 +35,16 @@ streamlit
 # ── Modo watcher automático ───────────────────────────────────
 watchdog
 
-# ── Publicación YouTube ──────────────────────────────────────
-# Requiere client_secrets.json y token.pickle
+# ── Publicación YouTube + Analítica ─────────────────────────
+# Publicación: requiere client_secrets_NombreCuenta.json (OAuth Desktop app)
+# Analítica:   requiere client_secrets_NombreCuenta.json con scopes:
+#                youtube.readonly + yt-analytics.readonly + yt-analytics-monetary.readonly
+# Token generado automáticamente: token_analytics_NombreCuenta.pickle
 google-api-python-client
 google-auth-oauthlib
+
+# ── Gráficos (pestaña Analítica) ─────────────────────────────
+altair
 
 # ── Publicación TikTok ───────────────────────────────────────
 # Requiere cookies.txt
